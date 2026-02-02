@@ -1,7 +1,7 @@
+use backoff::{ExponentialBackoff, retry_notify, Error};
 use libpulse_binding::stream::Direction;
 use thiserror::Error;
 use reqwest::header::CONTENT_TYPE;
-use reqwest::blocking::Response;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
 use symphonia::core::formats::FormatOptions;
@@ -22,26 +22,40 @@ pub enum R357Error {
     DecodeError(#[from] symphonia::core::errors::Error),
 }
 
-// #[tokio::main]
 fn main() -> Result<(), R357Error> {
-    println!("r357");
+    println!("r357 started");
 
+    let backoff = ExponentialBackoff::default();
+    let notify = |err, dur| {
+        println!("Retry error happened {} duration {:?} sec", err, dur);
+    };
+    let play = || { play().map_err(|e| Error::transient(e)) };
+    retry_notify(backoff, play, notify)
+        .map_err(|err| {
+            match err {
+                Error::Permanent(e) => e,
+                Error::Transient {
+                    err,
+                    retry_after: _
+                } => err,
+            }
+        })
+}
+
+fn play() -> Result<(), R357Error> {
     let response = reqwest::blocking::get("https://stream.radio357.pl/")?;
     let status = response.status();
-    println!("Status: {}", status);
+    if !status.is_success() {
+        eprintln!("Status: {}", status);
+        return Err(R357Error::NotMp3Stream)
+    }
+
     let content_type = response.headers().get(CONTENT_TYPE);
-    println!("Header: {:?}", content_type);
     if content_type.is_none_or(|hv| hv != "audio/mpeg") {
         eprintln!("Content-Type not supported {}", content_type.unwrap().to_str().unwrap());
         return Err(R357Error::NotMp3Stream)
     }
 
-    let _ = play(response);
-
-    Ok(())
-}
-
-fn play(response: Response) -> Result<(), R357Error> {
     let source = ReadOnlySource::new(response);
     let mss = MediaSourceStream::new(
         Box::new(source),
@@ -92,6 +106,7 @@ fn play(response: Response) -> Result<(), R357Error> {
         let decoded = decoder.decode(&packet)?;
 
         if sample_buf.is_none() {
+            println!("Playback started");
             sample_buf = Some(
                 SampleBuffer::<i16>::new(
                     decoded.capacity() as u64,
