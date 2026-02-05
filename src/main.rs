@@ -249,7 +249,7 @@ impl<R: Read> IcySource<R> {
                 Ok(mut guard) => {
                     let state = guard.deref_mut();
                     if state.song_title.as_deref() != Some(&title) {
-                        println!("New song title {}", &title);
+                        println!("{}", &title);
                         state.song_title = Some(title);
                     }
                 },
@@ -347,8 +347,6 @@ fn play(
     }
 
     let metaint = parse_metaint_header(&response)?;
-
-    println!("{:?}", response.headers());
 
     let source = IcySource::new(
         Box::new(response),
