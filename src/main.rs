@@ -3,7 +3,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::io::ErrorKind::NotSeekable;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, RwLock};
-use backoff::{ExponentialBackoff, retry_notify, Error};
+use backoff::{ExponentialBackoff};
 use libpulse_binding::stream::Direction;
 use thiserror::Error;
 use reqwest::header::CONTENT_TYPE;
@@ -21,6 +21,7 @@ use tokio::sync::mpsc::Sender;
 use warp::Filter;
 use warp::http::StatusCode;
 use serde::Serialize;
+use tokio::task::JoinError;
 
 #[derive(Error, Debug)]
 pub enum R357Error {
@@ -34,9 +35,11 @@ pub enum R357Error {
     PulseError(#[from] libpulse_binding::error::PAErr),
     #[error("Symphonia error: {0}")]
     DecodeError(#[from] symphonia::core::errors::Error),
+    #[error("Join error: {0}")]
+    JoinError(#[from] JoinError),
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct PlayerState {
     playing: bool,
     song_title: Option<String>,
@@ -47,8 +50,14 @@ impl PlayerState {
         self.playing = false;
         self.song_title = None;
     }
+
+    fn start(&mut self) {
+        self.playing = true;
+        self.song_title = None;
+    }
 }
 
+#[derive(Debug)]
 enum Command {
     Start,
     Stop,
@@ -128,10 +137,11 @@ async fn player_worker(
     let stop_flag = Arc::new(RwLock::new(false));
 
     while let Some(cmd) = rx.recv().await {
+        println!("received {:?}", cmd);
         match cmd {
             Command::Start => {
                 *stop_flag.write().unwrap() = false;
-                let _ = play_stream(state.clone(), Arc::clone(&stop_flag));
+                tokio::spawn(play_stream(state.clone(), Arc::clone(&stop_flag)));
             },
             Command::Stop => {
                 *stop_flag.write().unwrap() = true;
@@ -140,7 +150,7 @@ async fn player_worker(
     }
 }
 
-fn play_stream(
+async fn play_stream(
     state: Arc<RwLock<PlayerState>>,
     stop_flag: Arc<RwLock<bool>>,
 ) -> Result<(), R357Error> {
@@ -148,47 +158,37 @@ fn play_stream(
 
     {
         let mut state = state.write().unwrap();
-        state.playing = true;
-        state.song_title = None;
+        state.start();
     }
 
     let state_to_update = Arc::clone(&state);
 
-    tokio::task::spawn_blocking(move || {
-        let backoff = ExponentialBackoff::default();
-        let notify = |err, dur| {
-            println!("Retry error happened {} duration {:?} sec", err, dur);
-        };
-        let play = move || {
-            let state = Arc::clone(&state);
-            let stop_flag = Arc::clone(&stop_flag);
+    let backoff = ExponentialBackoff::default();
+    let notify = |err, dur| {
+        println!("Retry error happened {} duration {:?} sec", err, dur);
+    };
+
+    let play = async || {
+        let state = Arc::clone(&state);
+        let stop_flag = Arc::clone(&stop_flag);
+        tokio::task::spawn_blocking(move || {
             play(state, stop_flag)
-                .map_err(|e| Error::transient(e))
-        };
+                .map_err(|e| backoff::Error::transient(e))
+        })
+                .await
+                .map_err(|e| backoff::Error::transient(e))
+    };
 
-        let result = retry_notify(backoff, play, notify)
-            .map_err(|err| {
-                match err {
-                    Error::Permanent(e) => e,
-                    Error::Transient {
-                        err,
-                        retry_after: _
-                    } => err,
-                }
-            });
+    let _ = backoff::future::retry_notify(backoff, play, notify)
+        .await?;
 
-            // Make state stopped
-            {
-                let lock = state_to_update.write();
-                lock.unwrap().stop();
-            }
+    // Make state stopped
+    {
+        let lock = state_to_update.write();
+        lock.unwrap().stop();
+    }
 
-            println!("Stopped radio session");
-
-            result
-        });
-
-
+    println!("Stopped radio session");
 
     Ok(())
 }
@@ -281,8 +281,6 @@ impl<R: Read> Read for IcySource<R> {
         match self.metaint {
             None => self.inner.read(out),
             Some(metaint) => {
-                // println!("remaining_audio {}", self.remaining_audio);
-
                 let mut total = 0;
 
                 while total < out.len() {
@@ -293,7 +291,6 @@ impl<R: Read> Read for IcySource<R> {
                     }
 
                     let to_read = (out.len() - total).min(self.remaining_audio);
-                    // println!("to_read {}", to_read);
                     let n = self.inner.read(&mut out[total..total + to_read])?;
 
                     if n == 0 {
