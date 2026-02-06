@@ -21,7 +21,7 @@ use tokio::sync::mpsc::Sender;
 use warp::Filter;
 use warp::http::StatusCode;
 use serde::Serialize;
-use tokio::task::JoinError;
+use tokio::task::{JoinError, spawn, spawn_blocking};
 
 #[derive(Error, Debug)]
 pub enum R357Error {
@@ -72,7 +72,7 @@ async fn main() {
         song_title: None,
     }));
 
-    tokio::spawn(player_worker(rx, state.clone()));
+    spawn(player_worker(rx, state.clone()));
 
     let _ = start_http_server(tx, state).await;
 }
@@ -137,11 +137,10 @@ async fn player_worker(
     let stop_flag = Arc::new(RwLock::new(false));
 
     while let Some(cmd) = rx.recv().await {
-        println!("received {:?}", cmd);
         match cmd {
             Command::Start => {
                 *stop_flag.write().unwrap() = false;
-                tokio::spawn(play_stream(state.clone(), Arc::clone(&stop_flag)));
+                spawn(play_stream(state.clone(), Arc::clone(&stop_flag)));
             },
             Command::Stop => {
                 *stop_flag.write().unwrap() = true;
@@ -165,22 +164,26 @@ async fn play_stream(
 
     let backoff = ExponentialBackoff::default();
     let notify = |err, dur| {
-        println!("Retry error happened {} duration {:?} sec", err, dur);
+        println!("Retry error happened {} duration {:?}", err, dur);
     };
 
-    let play = async || {
+    let play = || async {
         let state = Arc::clone(&state);
         let stop_flag = Arc::clone(&stop_flag);
-        tokio::task::spawn_blocking(move || {
+
+        let result = spawn_blocking(move || {
             play(state, stop_flag)
                 .map_err(|e| backoff::Error::transient(e))
-        })
-                .await
-                .map_err(|e| backoff::Error::transient(e))
+        }).await;
+
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(backoff::Error::transient(R357Error::JoinError(e)))
+        }
     };
 
-    let _ = backoff::future::retry_notify(backoff, play, notify)
-        .await?;
+    let result = backoff::future::retry_notify(backoff, play, notify).await;
 
     // Make state stopped
     {
@@ -190,7 +193,7 @@ async fn play_stream(
 
     println!("Stopped radio session");
 
-    Ok(())
+    result
 }
 
 fn parse_metaint_header(response: &Response) -> Result<Option<usize>, R357Error> {
@@ -327,6 +330,10 @@ fn play(
     state: Arc<RwLock<PlayerState>>,
     stop_flag: Arc<RwLock<bool>>,
 ) -> Result<(), R357Error> {
+    if *stop_flag.read().unwrap() {
+        return Ok(())
+    }
+
     let client = blocking::Client::new();
     let response = client.get("https://stream.radio357.pl/")
         .header("Icy-MetaData", "1")
