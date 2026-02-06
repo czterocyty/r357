@@ -200,7 +200,7 @@ async fn play_stream(
 
         let result = spawn_blocking(move || {
             play(state, stop_flag, Arc::clone(&args))
-                .map_err(|e| backoff::Error::transient(e))
+                .map_err(backoff::Error::transient)
         }).await;
 
         match result {
@@ -229,7 +229,7 @@ fn parse_metaint_header(response: &Response) -> Result<Option<usize>, R357Error>
         metaint.to_str()
             .map_err(|_| R357Error::BadMetaIntHeader)
             .and_then(|s| s.parse::<usize>()
-                .map(|u| Some(u))
+                .map(Some)
                 .map_err(|_| R357Error::BadMetaIntHeader)
             )
     } else {
@@ -252,11 +252,7 @@ impl<R: Read> IcySource<R> {
             inner,
             metaint,
             state,
-            remaining_audio: if let Some(metaint) = metaint {
-                metaint
-            } else {
-                0
-            },
+            remaining_audio: metaint.unwrap_or(0),
         }
     }
 
@@ -275,15 +271,12 @@ impl<R: Read> IcySource<R> {
 
         if let Some(title) = self.parse_title(&buf) {
             let lock = self.state.try_write();
-            match lock {
-                Ok(mut guard) => {
-                    let state = guard.deref_mut();
-                    if state.song_title.as_deref() != Some(&title) {
-                        println!("{}", &title);
-                        state.song_title = Some(title);
-                    }
-                },
-                Err(_) => {},
+            if let Ok(mut guard) = lock {
+                let state = guard.deref_mut();
+                if state.song_title.as_deref() != Some(&title) {
+                    println!("{}", &title);
+                    state.song_title = Some(title);
+                }
             }
         }
 
@@ -345,7 +338,7 @@ impl<R: Read + Send> Seek for IcySource<R> {
 
 impl<R: Read + Send + Sync> MediaSource for IcySource<R> {
     fn is_seekable(&self) -> bool {
-        return false;
+        false
     }
 
     fn byte_len(&self) -> Option<u64> {
