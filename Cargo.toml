@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 reqwest = { version = "0.13.1", features = ["blocking", "stream"] }
 thiserror = "2.0.18"
-tokio = { version = "1.49.0", features = ["full"] }
+tokio = { version = "1.49.0", features = ["full", "tracing"] }
 futures-util = "0.3.31"
 symphonia = { version = "0.5.5", features = ["all", "opt-simd"] }
 libpulse-binding = "2.30.1"
@@ -16,3 +16,6 @@ backoff = { version = "0.4.0", features = ["tokio"] }
 warp = { version = "0.4.2", features = ["server"] }
 serde = { version = "1.0.228", features = ["derive"] }
 clap = { version = "4.5.36", features = ["derive"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
+tracing-journald = "0.3.2"

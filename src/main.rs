@@ -25,6 +25,10 @@ use warp::http::StatusCode;
 use serde::Serialize;
 use tokio::task::{JoinError, spawn, spawn_blocking};
 use clap::Parser;
+use tracing::{info, instrument, warn};
+use tracing_subscriber::{EnvFilter, Layer};
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{Registry, prelude::*};
 
 #[derive(Error, Debug)]
 pub enum R357Error {
@@ -78,8 +82,37 @@ enum Command {
     Stop,
 }
 
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let mut layers = Vec::new();
+
+    let journald_layer = tracing_journald::layer();
+    if let Ok(journald_layer) = journald_layer {
+        layers.push(journald_layer.boxed());
+    }
+
+    let stdout_layer = tracing_subscriber::fmt::layer()
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .with_line_number(true)
+        .with_file(true)
+        .boxed();
+
+    layers.push(stdout_layer);
+
+    Registry::default()
+        .with(filter)
+        .with(layers)
+        .init();
+}
+
 #[tokio::main]
 async fn main() {
+    init_tracing();
+
     let args = Args::parse();
     let args = Arc::new(args);
 
@@ -147,7 +180,7 @@ async fn start_http_server(
 
     let _ = warp::serve(routes).run(socket_addr).await;
 
-    println!("Http server started");
+    info!("Http server started at {}:{}", ipv4, args.port);
 
     Ok(())
 }
@@ -172,12 +205,13 @@ async fn player_worker(
     }
 }
 
+#[instrument(level = "trace")]
 async fn play_stream(
     state: Arc<RwLock<PlayerState>>,
     stop_flag: Arc<RwLock<bool>>,
     args: Arc<Args>,
 ) -> Result<(), R357Error> {
-    println!("r357 session started");
+    info!("r357 session started");
 
     {
         let mut state = state.write().unwrap();
@@ -188,7 +222,7 @@ async fn play_stream(
 
     let backoff = ExponentialBackoff::default();
     let notify = |err, dur| {
-        println!("Retry error happened {} duration {:?}", err, dur);
+        warn!("Retry error happened {} duration {:?}", err, dur);
     };
 
     let args = Arc::clone(&args);
@@ -218,7 +252,7 @@ async fn play_stream(
         lock.unwrap().stop();
     }
 
-    println!("Stopped radio session");
+    info!("Stopped radio session");
 
     result
 }
@@ -274,7 +308,7 @@ impl<R: Read> IcySource<R> {
             if let Ok(mut guard) = lock {
                 let state = guard.deref_mut();
                 if state.song_title.as_deref() != Some(&title) {
-                    println!("{}", &title);
+                    info!("{}", &title);
                     state.song_title = Some(title);
                 }
             }
@@ -346,6 +380,7 @@ impl<R: Read + Send + Sync> MediaSource for IcySource<R> {
     }
 }
 
+#[instrument(level = "trace")]
 fn play(
     state: Arc<RwLock<PlayerState>>,
     stop_flag: Arc<RwLock<bool>>,
@@ -361,13 +396,13 @@ fn play(
         .send()?;
     let status = response.status();
     if !status.is_success() {
-        eprintln!("Status: {}", status);
+        warn!("Status: {}", status);
         return Err(R357Error::NotMp3Stream)
     }
 
     let content_type = response.headers().get(CONTENT_TYPE);
     if content_type.is_none_or(|hv| hv != "audio/mpeg") {
-        eprintln!("Content-Type not supported {}", content_type.unwrap().to_str().unwrap());
+        warn!("Content-Type not supported {}", content_type.unwrap().to_str().unwrap());
         return Err(R357Error::NotMp3Stream)
     }
 
@@ -427,7 +462,7 @@ fn play(
         let decoded = decoder.decode(&packet)?;
 
         if sample_buf.is_none() {
-            println!("Playback started");
+            info!("Playback started");
             sample_buf = Some(
                 SampleBuffer::<i16>::new(
                     decoded.capacity() as u64,
