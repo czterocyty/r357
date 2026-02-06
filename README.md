@@ -23,7 +23,7 @@ as display current played song name.
 
 # Build
 
-Install Rust toolchains
+Install Rust toolchains - [https://rust-lang.org/tools/install/].
 
 ```bash
 cargo build --release
@@ -43,5 +43,6 @@ cargo run -- --help
 * reqwest
 * backoff
 * libpulse
+* warp
 
 Also CPU SIMD (CPU instruction extension sets can be used)
