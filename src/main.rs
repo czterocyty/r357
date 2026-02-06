@@ -1,7 +1,9 @@
 use std::convert::Infallible;
 use std::io::{Read, Seek, SeekFrom};
 use std::io::ErrorKind::NotSeekable;
+use std::net::{AddrParseError, Ipv4Addr, SocketAddrV4};
 use std::ops::{Deref, DerefMut};
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use backoff::{ExponentialBackoff};
 use libpulse_binding::stream::Direction;
@@ -22,6 +24,7 @@ use warp::Filter;
 use warp::http::StatusCode;
 use serde::Serialize;
 use tokio::task::{JoinError, spawn, spawn_blocking};
+use clap::Parser;
 
 #[derive(Error, Debug)]
 pub enum R357Error {
@@ -37,6 +40,18 @@ pub enum R357Error {
     DecodeError(#[from] symphonia::core::errors::Error),
     #[error("Join error: {0}")]
     JoinError(#[from] JoinError),
+    #[error("Bad binding {0}")]
+    BadBinding(#[from] AddrParseError),
+}
+
+#[derive(Debug, Parser)]
+struct Args {
+    #[arg(short, default_value = "https://stream.radio357.pl")]
+    url: String,
+    #[arg(short, default_value = "0.0.0.0")]
+    binding: String,
+    #[arg(short, default_value_t = 6681)]
+    port: u16,
 }
 
 #[derive(Serialize, Debug)]
@@ -65,6 +80,9 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
+    let args = Arc::new(args);
+
     let (tx, rx) = tokio::sync::mpsc::channel(8);
 
     let state = Arc::new(RwLock::new(PlayerState {
@@ -72,9 +90,9 @@ async fn main() {
         song_title: None,
     }));
 
-    spawn(player_worker(rx, state.clone()));
+    spawn(player_worker(rx, state.clone(), Arc::clone(&args)));
 
-    let _ = start_http_server(tx, state).await;
+    let _ = start_http_server(tx, state, &args).await;
 }
 
 async fn handle_status(
@@ -104,7 +122,8 @@ async fn handle_stop(tx: Arc<Sender<Command>>) -> Result<impl warp::Reply, warp:
 
 async fn start_http_server(
     tx: Sender<Command>,
-    state: Arc<RwLock<PlayerState>>
+    state: Arc<RwLock<PlayerState>>,
+    args: &Args,
 ) -> Result<(), R357Error> {
     let tx = Arc::new(tx);
     let tx1 = Arc::clone(&tx);
@@ -123,7 +142,10 @@ async fn start_http_server(
         .or(start_route)
         .or(stop_route);
 
-    let _ = warp::serve(routes).run(([0, 0, 0, 0], 6681)).await;
+    let ipv4 = Ipv4Addr::from_str(&args.binding)?;
+    let socket_addr = SocketAddrV4::new(ipv4, args.port);
+
+    let _ = warp::serve(routes).run(socket_addr).await;
 
     println!("Http server started");
 
@@ -133,6 +155,7 @@ async fn start_http_server(
 async fn player_worker(
     mut rx: mpsc::Receiver<Command>,
     state: Arc<RwLock<PlayerState>>,
+    args: Arc<Args>,
 ) {
     let stop_flag = Arc::new(RwLock::new(false));
 
@@ -140,7 +163,7 @@ async fn player_worker(
         match cmd {
             Command::Start => {
                 *stop_flag.write().unwrap() = false;
-                spawn(play_stream(state.clone(), Arc::clone(&stop_flag)));
+                spawn(play_stream(state.clone(), Arc::clone(&stop_flag), Arc::clone(&args)));
             },
             Command::Stop => {
                 *stop_flag.write().unwrap() = true;
@@ -152,6 +175,7 @@ async fn player_worker(
 async fn play_stream(
     state: Arc<RwLock<PlayerState>>,
     stop_flag: Arc<RwLock<bool>>,
+    args: Arc<Args>,
 ) -> Result<(), R357Error> {
     println!("r357 session started");
 
@@ -167,12 +191,15 @@ async fn play_stream(
         println!("Retry error happened {} duration {:?}", err, dur);
     };
 
+    let args = Arc::clone(&args);
+
     let play = || async {
         let state = Arc::clone(&state);
         let stop_flag = Arc::clone(&stop_flag);
+        let args = Arc::clone(&args);
 
         let result = spawn_blocking(move || {
-            play(state, stop_flag)
+            play(state, stop_flag, Arc::clone(&args))
                 .map_err(|e| backoff::Error::transient(e))
         }).await;
 
@@ -329,13 +356,14 @@ impl<R: Read + Send + Sync> MediaSource for IcySource<R> {
 fn play(
     state: Arc<RwLock<PlayerState>>,
     stop_flag: Arc<RwLock<bool>>,
+    args: Arc<Args>,
 ) -> Result<(), R357Error> {
     if *stop_flag.read().unwrap() {
         return Ok(())
     }
 
     let client = blocking::Client::new();
-    let response = client.get("https://stream.radio357.pl/")
+    let response = client.get(&args.url)
         .header("Icy-MetaData", "1")
         .send()?;
     let status = response.status();
