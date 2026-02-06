@@ -36,3 +36,12 @@ Execute command line to know default settings:
 ```bash
 cargo run -- --help
 ```
+
+## Internal dependencies
+
+* symphonia
+* reqwest
+* backoff
+* libpulse
+
+Also CPU SIMD (CPU instruction extension sets can be used)
