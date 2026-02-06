@@ -6,7 +6,7 @@ and emits audio to PulseAudio sink.
 This is very convenient on single board computers like popular Raspberrypi that
 has audio card.
 
-The deamon exposes REST HTTP API endpoint to start, stop and get current daemon status:
+The daemon exposes REST HTTP API endpoint to start, stop and get current daemon status:
 
 * `GET /status` -> daemon status
 * `POST /start` -> starts playback
@@ -18,7 +18,7 @@ errors.
 ## Android r357 remote control application
 
 I am planning to write simple Android application that allows to
-connect to the deamon in home network and control playback as well
+connect to the daemon in home network and control playback as well
 as display current played song name.
 
 # Build
