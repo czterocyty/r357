@@ -25,7 +25,7 @@ use tokio::sync::mpsc::Sender;
 use warp::Filter;
 use warp::http::StatusCode;
 use serde::Serialize;
-use tokio::task::{JoinError, spawn, spawn_blocking};
+use tokio::task::{AbortHandle, JoinError, spawn, spawn_blocking};
 use clap::Parser;
 use tokio::time::Sleep;
 use tracing::{info, instrument, Level, warn};
@@ -107,7 +107,7 @@ fn init_tracing() {
         .with_thread_names(true)
         .with_line_number(true)
         .with_file(true)
-        .with_span_events(FmtSpan::ENTER)
+        // .with_span_events(FmtSpan::FULL)
         .boxed();
 
     layers.push(stdout_layer);
@@ -204,17 +204,29 @@ async fn player_worker(
     args: Arc<Args>,
 ) {
     let stop_flag = Arc::new(RwLock::new(false));
+    let mut abort_handler: Option<AbortHandle> = None;
 
     while let Some(cmd) = rx.recv().await {
         match cmd {
             Command::Start => {
                 *stop_flag.write().unwrap() = false;
-                spawn(
+                let abort_handle = spawn(
                     play_stream(state.clone(), Arc::clone(&stop_flag), Arc::clone(&args))
-                );
+                ).abort_handle();
+                abort_handler = Some(abort_handle);
             },
             Command::Stop => {
+                if let Some(abort_handle) = abort_handler {
+                    abort_handle.abort();
+                    abort_handler = None;
+                }
                 *stop_flag.write().unwrap() = true;
+
+                // Make state stopped
+                {
+                    let lock = state.write();
+                    lock.unwrap().stop();
+                }
             }
         }
     }
@@ -230,7 +242,7 @@ impl Sleeper for InstrumentedSleeper {
     type Sleep = Instrumented<Sleep>;
     fn sleep(&self, dur: Duration) -> Self::Sleep {
         tokio::time::sleep(dur)
-            .instrument(tracing::span!(Level::DEBUG, "sleeper"))
+            .instrument(tracing::span!(Level::DEBUG, "sleeper", sleep = dur.as_secs_f64()))
     }
 }
 
