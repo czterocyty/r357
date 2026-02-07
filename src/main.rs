@@ -5,7 +5,9 @@ use std::net::{AddrParseError, Ipv4Addr, SocketAddrV4};
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use backoff::{ExponentialBackoff};
+use backoff::future::{Retry, Sleeper};
 use libpulse_binding::stream::Direction;
 use thiserror::Error;
 use reqwest::header::CONTENT_TYPE;
@@ -25,10 +27,14 @@ use warp::http::StatusCode;
 use serde::Serialize;
 use tokio::task::{JoinError, spawn, spawn_blocking};
 use clap::Parser;
-use tracing::{info, instrument, warn};
+use tokio::time::Sleep;
+use tracing::{info, instrument, Level, warn};
 use tracing_subscriber::{EnvFilter, Layer};
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Registry, prelude::*};
+use tracing::Instrument;
+use tracing::instrument::Instrumented;
+use tracing_subscriber::fmt::format::FmtSpan;
 
 #[derive(Error, Debug)]
 pub enum R357Error {
@@ -84,7 +90,9 @@ enum Command {
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+        .unwrap_or_else(|_| {
+            EnvFilter::new("error,r357=debug")
+        });
 
     let mut layers = Vec::new();
 
@@ -99,6 +107,7 @@ fn init_tracing() {
         .with_thread_names(true)
         .with_line_number(true)
         .with_file(true)
+        .with_span_events(FmtSpan::ENTER)
         .boxed();
 
     layers.push(stdout_layer);
@@ -116,14 +125,16 @@ async fn main() {
     let args = Args::parse();
     let args = Arc::new(args);
 
-    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    let (tx, rx) = mpsc::channel(8);
 
     let state = Arc::new(RwLock::new(PlayerState {
         playing: false,
         song_title: None,
     }));
 
-    spawn(player_worker(rx, state.clone(), Arc::clone(&args)));
+    spawn(
+        player_worker(rx, state.clone(), Arc::clone(&args))
+    );
 
     let _ = start_http_server(tx, state, &args).await;
 }
@@ -178,9 +189,11 @@ async fn start_http_server(
     let ipv4 = Ipv4Addr::from_str(&args.binding)?;
     let socket_addr = SocketAddrV4::new(ipv4, args.port);
 
-    let _ = warp::serve(routes).run(socket_addr).await;
+    let running = warp::serve(routes).run(socket_addr);
 
     info!("Http server started at {}:{}", ipv4, args.port);
+
+    running.await;
 
     Ok(())
 }
@@ -196,7 +209,9 @@ async fn player_worker(
         match cmd {
             Command::Start => {
                 *stop_flag.write().unwrap() = false;
-                spawn(play_stream(state.clone(), Arc::clone(&stop_flag), Arc::clone(&args)));
+                spawn(
+                    play_stream(state.clone(), Arc::clone(&stop_flag), Arc::clone(&args))
+                );
             },
             Command::Stop => {
                 *stop_flag.write().unwrap() = true;
@@ -205,7 +220,21 @@ async fn player_worker(
     }
 }
 
-#[instrument(level = "trace")]
+fn create_sleeper() -> impl Sleeper {
+    InstrumentedSleeper
+}
+
+struct InstrumentedSleeper;
+
+impl Sleeper for InstrumentedSleeper {
+    type Sleep = Instrumented<Sleep>;
+    fn sleep(&self, dur: Duration) -> Self::Sleep {
+        tokio::time::sleep(dur)
+            .instrument(tracing::span!(Level::DEBUG, "sleeper"))
+    }
+}
+
+#[instrument(level = "debug")]
 async fn play_stream(
     state: Arc<RwLock<PlayerState>>,
     stop_flag: Arc<RwLock<bool>>,
@@ -244,7 +273,9 @@ async fn play_stream(
         }
     };
 
-    let result = backoff::future::retry_notify(backoff, play, notify).await;
+    let sleeper = create_sleeper();
+    let retry = Retry::new(sleeper, backoff, notify, play);
+    let result = retry.await;
 
     // Make state stopped
     {
@@ -380,7 +411,7 @@ impl<R: Read + Send + Sync> MediaSource for IcySource<R> {
     }
 }
 
-#[instrument(level = "trace")]
+#[instrument(level = "debug")]
 fn play(
     state: Arc<RwLock<PlayerState>>,
     stop_flag: Arc<RwLock<bool>>,
