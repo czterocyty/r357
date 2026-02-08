@@ -97,6 +97,7 @@ fn init_tracing() {
 
     let journald_layer = tracing_journald::layer();
     if let Ok(journald_layer) = journald_layer {
+        info!("Enabling journald");
         layers.push(journald_layer.boxed());
     }
 
