@@ -31,7 +31,14 @@ cargo build --release
 
 ## Cross compilation
 
-TODO
+It is rather hard to compile application on RaspberryPi due to limited resources.
+
+To allow cross-compilation on let's say amd64 Linux PC, build docker image. It is based on Debian Bookworm
+image which should be compatible with Raspberry Pi 4 operating-system.
+
+See individual instructions in Dockerfile comments.
+
+Once build on PC system, copy release binary onto you SBC system, like Raspberry Pi, under `/usr/local/bin`.
 
 # Configuration
 
@@ -41,14 +48,30 @@ Execute command line to know default settings:
 cargo run -- --help
 ```
 
+Current output:
+
+```bash
+Usage: r357 [OPTIONS]
+
+Options:
+  -u <URL>      [default: https://stream.radio357.pl]
+  -b <BINDING>  [default: 0.0.0.0]
+  -p <PORT>     [default: 6681]
+  -h, --help    Print help
+```
+
+# `systemctl` installation
+
+Use systemctl unit template from `systemd/r357.service` to install r357 as system-wide daemon.
+
+See systemctl documentation.
+
 ## Internal dependencies
 
 * symphonia (for mp3 decoding)
 * reqwest (for accessing radio http stream endpoint)
 * backoff (to retry playback in case of runtime errors)
 * libpulse (to play on audio device)
-* warp (to manage radio playback)
-* tokio (to intenally manage async operations)
+* warp (to manage radio playback via HTTP REST endpoints)
+* tokio (to internally manage async operations)
 * tracing (for logging and observability)
-
-Also CPU SIMD instruction extension sets can be used.
