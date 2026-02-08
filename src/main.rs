@@ -5,6 +5,7 @@ use std::net::{AddrParseError, Ipv4Addr, SocketAddrV4};
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+use std::thread;
 use std::time::Duration;
 use backoff::{ExponentialBackoff};
 use backoff::future::{Retry, Sleeper};
@@ -205,21 +206,25 @@ async fn player_worker(
     state: Arc<RwLock<PlayerState>>,
     args: Arc<Args>,
 ) {
-    // let stop_flag = Arc::new(RwLock::new(false));
-    // let mut abort_handler: Option<AbortHandle> = None;
-
-    let token = CancellationToken::new();
-    let token_child = token.clone();
+    let mut stored_token: Option<CancellationToken> = None;
 
     while let Some(cmd) = rx.recv().await {
         match cmd {
             Command::Start => {
+                let token = CancellationToken::new();
+                let token_child = token.clone();
+
+                stored_token = Some(token);
+
                 spawn(
-                    play_stream(state.clone(), Arc::clone(&args), token_child.clone())
+                    play_stream(state.clone(), Arc::clone(&args), token_child)
                 );
             },
             Command::Stop => {
-                token.cancel();
+                if let Some(token) = stored_token {
+                    token.cancel();
+                    stored_token = None;
+                }
             }
         }
     }
@@ -282,7 +287,10 @@ async fn play_stream(
     let retry = Retry::new(sleeper, backoff, notify, play);
     let result = select! {
         result = retry => result,
-        _ = cancel_token.cancelled() => Ok(())
+        _ = cancel_token.cancelled() => {
+            info!("Cancelling playback");
+            Ok(())
+        }
     };
 
     // Make state stopped
@@ -517,6 +525,10 @@ fn play(
         let pcm_u8: &[u8] = bytemuck::cast_slice(pcm);
 
         p.write(pcm_u8)?;
+
+        thread::sleep(Duration::from_secs(2));
+
+        return Err(R357Error::NotMp3Stream);
     }
 
     Ok(())
