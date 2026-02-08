@@ -525,10 +525,6 @@ fn play(
         let pcm_u8: &[u8] = bytemuck::cast_slice(pcm);
 
         p.write(pcm_u8)?;
-
-        thread::sleep(Duration::from_secs(2));
-
-        return Err(R357Error::NotMp3Stream);
     }
 
     Ok(())
