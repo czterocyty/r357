@@ -1,0 +1,14 @@
+[Unit]
+Description=Internet Radio 357 daemon
+Wants=network.target sound.target
+After=network.target sound.target
+
+[Service]
+DynamicUser=yes
+SupplementaryGroups=audio
+Restart=always
+RestartSec=10
+ExecStart=/usr/local/bin/r357
+
+[Install]
+WantedBy=multi-user.target

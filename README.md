@@ -23,11 +23,15 @@ as display current played song name.
 
 # Build
 
-Install Rust toolchains - [https://rust-lang.org/tools/install/].
+Install Rust toolchains - https://rust-lang.org/tools/install/
 
 ```bash
 cargo build --release
 ```
+
+## Cross compilation
+
+TODO
 
 # Configuration
 
@@ -39,10 +43,12 @@ cargo run -- --help
 
 ## Internal dependencies
 
-* symphonia
-* reqwest
-* backoff
-* libpulse
-* warp
+* symphonia (for mp3 decoding)
+* reqwest (for accessing radio http stream endpoint)
+* backoff (to retry playback in case of runtime errors)
+* libpulse (to play on audio device)
+* warp (to manage radio playback)
+* tokio (to intenally manage async operations)
+* tracing (for logging and observability)
 
-Also CPU SIMD (CPU instruction extension sets can be used)
+Also CPU SIMD instruction extension sets can be used.

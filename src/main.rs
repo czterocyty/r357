@@ -34,7 +34,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Registry, prelude::*};
 use tracing::Instrument;
 use tracing::instrument::Instrumented;
-use tracing_subscriber::fmt::format::FmtSpan;
+
 
 #[derive(Error, Debug)]
 pub enum R357Error {
