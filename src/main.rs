@@ -14,7 +14,6 @@ use std::net::{AddrParseError, Ipv4Addr, SocketAddrV4};
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
-use std::thread;
 use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
