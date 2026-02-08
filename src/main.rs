@@ -1,43 +1,42 @@
+use backoff::ExponentialBackoff;
+use backoff::future::{Retry, Sleeper};
+use clap::Parser;
+use libpulse_binding::stream::Direction;
+use libpulse_simple_binding as pulse;
+use reqwest::blocking;
+use reqwest::blocking::Response;
+use reqwest::header::CONTENT_TYPE;
+use serde::Serialize;
 use std::convert::Infallible;
-use std::io::{Read, Seek, SeekFrom};
 use std::io::ErrorKind::NotSeekable;
+use std::io::{Read, Seek, SeekFrom};
 use std::net::{AddrParseError, Ipv4Addr, SocketAddrV4};
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
-use backoff::{ExponentialBackoff};
-use backoff::future::{Retry, Sleeper};
-use libpulse_binding::stream::Direction;
-use thiserror::Error;
-use reqwest::header::CONTENT_TYPE;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use libpulse_simple_binding as pulse;
-use reqwest::blocking;
-use reqwest::blocking::Response;
+use thiserror::Error;
+use tokio::select;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
-use warp::Filter;
-use warp::http::StatusCode;
-use serde::Serialize;
 use tokio::task::{JoinError, spawn, spawn_blocking};
-use clap::Parser;
-use tokio::select;
 use tokio::time::Sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument, Level, warn};
-use tracing_subscriber::{EnvFilter, Layer};
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{Registry, prelude::*};
 use tracing::Instrument;
 use tracing::instrument::Instrumented;
-
+use tracing::{Level, info, instrument, warn};
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer};
+use tracing_subscriber::{Registry, prelude::*};
+use warp::Filter;
+use warp::http::StatusCode;
 
 #[derive(Error, Debug)]
 pub enum R357Error {
@@ -92,10 +91,8 @@ enum Command {
 }
 
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| {
-            EnvFilter::new("error,r357=debug")
-        });
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("error,r357=debug"));
 
     let mut layers = Vec::new();
 
@@ -115,10 +112,7 @@ fn init_tracing() {
 
     layers.push(stdout_layer);
 
-    Registry::default()
-        .with(filter)
-        .with(layers)
-        .init();
+    Registry::default().with(filter).with(layers).init();
 }
 
 #[tokio::main]
@@ -135,19 +129,15 @@ async fn main() {
         song_title: None,
     }));
 
-    spawn(
-        player_worker(rx, state.clone(), Arc::clone(&args))
-    );
+    spawn(player_worker(rx, state.clone(), Arc::clone(&args)));
 
     let _ = start_http_server(tx, state, &args).await;
 }
 
-async fn handle_status(
-    state: Arc<RwLock<PlayerState>>,
-) -> Result<impl warp::Reply, Infallible> {
+async fn handle_status(state: Arc<RwLock<PlayerState>>) -> Result<impl warp::Reply, Infallible> {
     let state = Arc::clone(&state);
     let state = state.read();
-    let state= state.unwrap();
+    let state = state.unwrap();
     let state = state.deref();
     Ok(warp::reply::json(state))
 }
@@ -155,9 +145,8 @@ async fn handle_status(
 async fn handle_start(tx: Arc<Sender<Command>>) -> Result<impl warp::Reply, Infallible> {
     match tx.send(Command::Start).await {
         Ok(_) => Ok(StatusCode::ACCEPTED),
-        Err(_) => Ok(StatusCode::INTERNAL_SERVER_ERROR)
+        Err(_) => Ok(StatusCode::INTERNAL_SERVER_ERROR),
     }
-
 }
 
 async fn handle_stop(tx: Arc<Sender<Command>>) -> Result<impl warp::Reply, warp::Rejection> {
@@ -176,18 +165,17 @@ async fn start_http_server(
     let tx1 = Arc::clone(&tx);
     let tx2 = Arc::clone(&tx);
 
-    let status_route = warp::path("status")
-        .and_then(move || handle_status(state.clone()));
+    let status_route = warp::path("status").and_then(move || handle_status(state.clone()));
 
-    let start_route = warp::post().and(warp::path("start"))
+    let start_route = warp::post()
+        .and(warp::path("start"))
         .and_then(move || handle_start(Arc::clone(&tx1)));
 
-    let stop_route = warp::post().and(warp::path("stop"))
+    let stop_route = warp::post()
+        .and(warp::path("stop"))
         .and_then(move || handle_stop(Arc::clone(&tx2)));
 
-    let routes = status_route
-        .or(start_route)
-        .or(stop_route);
+    let routes = status_route.or(start_route).or(stop_route);
 
     let ipv4 = Ipv4Addr::from_str(&args.binding)?;
     let socket_addr = SocketAddrV4::new(ipv4, args.port);
@@ -216,10 +204,8 @@ async fn player_worker(
 
                 stored_token = Some(token);
 
-                spawn(
-                    play_stream(state.clone(), Arc::clone(&args), token_child)
-                );
-            },
+                spawn(play_stream(state.clone(), Arc::clone(&args), token_child));
+            }
             Command::Stop => {
                 if let Some(token) = stored_token {
                     token.cancel();
@@ -239,8 +225,11 @@ struct InstrumentedSleeper;
 impl Sleeper for InstrumentedSleeper {
     type Sleep = Instrumented<Sleep>;
     fn sleep(&self, dur: Duration) -> Self::Sleep {
-        tokio::time::sleep(dur)
-            .instrument(tracing::span!(Level::DEBUG, "sleeper", sleep = dur.as_secs_f64()))
+        tokio::time::sleep(dur).instrument(tracing::span!(
+            Level::DEBUG,
+            "sleeper",
+            sleep = dur.as_secs_f64()
+        ))
     }
 }
 
@@ -272,14 +261,14 @@ async fn play_stream(
         let cancel_token = cancel_token.clone();
 
         let result = spawn_blocking(move || {
-            play(state, Arc::clone(&args), cancel_token.clone())
-                .map_err(backoff::Error::transient)
-        }).await;
+            play(state, Arc::clone(&args), cancel_token.clone()).map_err(backoff::Error::transient)
+        })
+        .await;
 
         match result {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(e),
-            Err(e) => Err(backoff::Error::transient(R357Error::JoinError(e)))
+            Err(e) => Err(backoff::Error::transient(R357Error::JoinError(e))),
         }
     };
 
@@ -307,12 +296,14 @@ async fn play_stream(
 fn parse_metaint_header(response: &Response) -> Result<Option<usize>, R357Error> {
     let metaint = response.headers().get("Icy-Metaint");
     let metaint = if let Some(metaint) = metaint {
-        metaint.to_str()
+        metaint
+            .to_str()
             .map_err(|_| R357Error::BadMetaIntHeader)
-            .and_then(|s| s.parse::<usize>()
-                .map(Some)
-                .map_err(|_| R357Error::BadMetaIntHeader)
-            )
+            .and_then(|s| {
+                s.parse::<usize>()
+                    .map(Some)
+                    .map_err(|_| R357Error::BadMetaIntHeader)
+            })
     } else {
         Ok(None)
     };
@@ -344,7 +335,7 @@ impl<R: Read> IcySource<R> {
         let meta_len = metaint_size_buf[0] as usize * 16;
 
         if meta_len == 0 {
-            return Ok(())
+            return Ok(());
         }
 
         let mut buf = vec![0u8; meta_len];
@@ -406,7 +397,7 @@ impl<R: Read> Read for IcySource<R> {
                 }
 
                 Ok(total)
-            },
+            }
         }
     }
 }
@@ -434,36 +425,30 @@ fn play(
     cancel_token: CancellationToken,
 ) -> Result<(), R357Error> {
     if cancel_token.is_cancelled() {
-        return Ok(())
+        return Ok(());
     }
 
     let client = blocking::Client::new();
-    let response = client.get(&args.url)
-        .header("Icy-MetaData", "1")
-        .send()?;
+    let response = client.get(&args.url).header("Icy-MetaData", "1").send()?;
     let status = response.status();
     if !status.is_success() {
         warn!("Status: {}", status);
-        return Err(R357Error::NotMp3Stream)
+        return Err(R357Error::NotMp3Stream);
     }
 
     let content_type = response.headers().get(CONTENT_TYPE);
     if content_type.is_none_or(|hv| hv != "audio/mpeg") {
-        warn!("Content-Type not supported {}", content_type.unwrap().to_str().unwrap());
-        return Err(R357Error::NotMp3Stream)
+        warn!(
+            "Content-Type not supported {}",
+            content_type.unwrap().to_str().unwrap()
+        );
+        return Err(R357Error::NotMp3Stream);
     }
 
     let metaint = parse_metaint_header(&response)?;
 
-    let source = IcySource::new(
-        Box::new(response),
-        metaint,
-        state,
-    );
-    let mss = MediaSourceStream::new(
-        Box::new(source),
-        MediaSourceStreamOptions::default(),
-    );
+    let source = IcySource::new(Box::new(response), metaint, state);
+    let mss = MediaSourceStream::new(Box::new(source), MediaSourceStreamOptions::default());
 
     let mut hint = Hint::new();
     hint.mime_type("audio/mpeg");
@@ -471,19 +456,19 @@ fn play(
     let meta_opts = MetadataOptions::default();
     let format_opts = FormatOptions::default();
 
-    let probe = symphonia::default::get_probe()
-        .format(&hint, mss, &format_opts, &meta_opts)?;
+    let probe = symphonia::default::get_probe().format(&hint, mss, &format_opts, &meta_opts)?;
 
     let mut format = probe.format;
 
-    let track = format.tracks()
+    let track = format
+        .tracks()
         .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL).unwrap();
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .unwrap();
 
     // Use the default options for the decoder.
     let dec_opts: DecoderOptions = DecoderOptions::default();
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &dec_opts)?;
+    let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &dec_opts)?;
 
     let mut sample_buf: Option<SampleBuffer<i16>> = None;
 
@@ -510,12 +495,10 @@ fn play(
 
         if sample_buf.is_none() {
             info!("Playback started");
-            sample_buf = Some(
-                SampleBuffer::<i16>::new(
-                    decoded.capacity() as u64,
-                    *decoded.spec(),
-                )
-            )
+            sample_buf = Some(SampleBuffer::<i16>::new(
+                decoded.capacity() as u64,
+                *decoded.spec(),
+            ))
         }
 
         let buf = sample_buf.as_mut().unwrap();
