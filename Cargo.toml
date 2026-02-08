@@ -18,3 +18,4 @@ clap = { version = "4.5.36", features = ["derive"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 tracing-journald = "0.3.2"
+tokio-util = "0.7.18"

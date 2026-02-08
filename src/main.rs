@@ -25,9 +25,11 @@ use tokio::sync::mpsc::Sender;
 use warp::Filter;
 use warp::http::StatusCode;
 use serde::Serialize;
-use tokio::task::{AbortHandle, JoinError, spawn, spawn_blocking};
+use tokio::task::{JoinError, spawn, spawn_blocking};
 use clap::Parser;
+use tokio::select;
 use tokio::time::Sleep;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, Level, warn};
 use tracing_subscriber::{EnvFilter, Layer};
 use tracing_subscriber::util::SubscriberInitExt;
@@ -203,30 +205,21 @@ async fn player_worker(
     state: Arc<RwLock<PlayerState>>,
     args: Arc<Args>,
 ) {
-    let stop_flag = Arc::new(RwLock::new(false));
-    let mut abort_handler: Option<AbortHandle> = None;
+    // let stop_flag = Arc::new(RwLock::new(false));
+    // let mut abort_handler: Option<AbortHandle> = None;
+
+    let token = CancellationToken::new();
+    let token_child = token.clone();
 
     while let Some(cmd) = rx.recv().await {
         match cmd {
             Command::Start => {
-                *stop_flag.write().unwrap() = false;
-                let abort_handle = spawn(
-                    play_stream(state.clone(), Arc::clone(&stop_flag), Arc::clone(&args))
-                ).abort_handle();
-                abort_handler = Some(abort_handle);
+                spawn(
+                    play_stream(state.clone(), Arc::clone(&args), token_child.clone())
+                );
             },
             Command::Stop => {
-                if let Some(abort_handle) = abort_handler {
-                    abort_handle.abort();
-                    abort_handler = None;
-                }
-                *stop_flag.write().unwrap() = true;
-
-                // Make state stopped
-                {
-                    let lock = state.write();
-                    lock.unwrap().stop();
-                }
+                token.cancel();
             }
         }
     }
@@ -249,8 +242,8 @@ impl Sleeper for InstrumentedSleeper {
 #[instrument(level = "debug")]
 async fn play_stream(
     state: Arc<RwLock<PlayerState>>,
-    stop_flag: Arc<RwLock<bool>>,
     args: Arc<Args>,
+    cancel_token: CancellationToken,
 ) -> Result<(), R357Error> {
     info!("r357 session started");
 
@@ -270,11 +263,11 @@ async fn play_stream(
 
     let play = || async {
         let state = Arc::clone(&state);
-        let stop_flag = Arc::clone(&stop_flag);
         let args = Arc::clone(&args);
+        let cancel_token = cancel_token.clone();
 
         let result = spawn_blocking(move || {
-            play(state, stop_flag, Arc::clone(&args))
+            play(state, Arc::clone(&args), cancel_token.clone())
                 .map_err(backoff::Error::transient)
         }).await;
 
@@ -287,7 +280,10 @@ async fn play_stream(
 
     let sleeper = create_sleeper();
     let retry = Retry::new(sleeper, backoff, notify, play);
-    let result = retry.await;
+    let result = select! {
+        result = retry => result,
+        _ = cancel_token.cancelled() => Ok(())
+    };
 
     // Make state stopped
     {
@@ -426,10 +422,10 @@ impl<R: Read + Send + Sync> MediaSource for IcySource<R> {
 #[instrument(level = "debug")]
 fn play(
     state: Arc<RwLock<PlayerState>>,
-    stop_flag: Arc<RwLock<bool>>,
     args: Arc<Args>,
+    cancel_token: CancellationToken,
 ) -> Result<(), R357Error> {
-    if *stop_flag.read().unwrap() {
+    if cancel_token.is_cancelled() {
         return Ok(())
     }
 
@@ -500,7 +496,7 @@ fn play(
         None,
     )?;
 
-    while !*stop_flag.read().unwrap() {
+    while !cancel_token.is_cancelled() {
         let packet = format.next_packet()?;
         let decoded = decoder.decode(&packet)?;
 
@@ -525,135 +521,3 @@ fn play(
 
     Ok(())
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use std::io::{BufReader, Cursor, Read};
-//     use crate::IcySource;
-//
-//     #[test]
-//     fn read_2_out_of_4_metaint() {
-//         let str = "ABCD";
-//         let mut source = IcySource::new(Box::new(BufReader::new(Cursor::new(str))), Some(4));
-//
-//         let mut buf: [u8; 2] = [0u8; 2];
-//
-//         let result = source.read(buf.as_mut_slice());
-//         assert_eq!(result.is_ok(), true);
-//         assert_eq!(result.unwrap(), 2);
-//         assert_eq!(buf[0], 65u8);
-//         assert_eq!(buf[1], 66u8);
-//     }
-//
-//     #[test]
-//     fn read_4_out_of_4_metaint() {
-//         let str = "ABCD";
-//         let mut source = IcySource::new(Box::new(BufReader::new(Cursor::new(str))), Some(4));
-//
-//         let mut buf: [u8; 4] = [0u8; 4];
-//
-//         let result = source.read(buf.as_mut_slice());
-//         assert_eq!(result.is_ok(), true);
-//         assert_eq!(result.unwrap(), 4);
-//         assert_eq!(buf[0], 65u8);
-//         assert_eq!(buf[1], 66u8);
-//         assert_eq!(buf[2], 67u8);
-//         assert_eq!(buf[3], 68u8);
-//     }
-//
-//     #[test]
-//     fn read_4_out_of_2_metaint() {
-//         let str = "AB";
-//         let mut source = IcySource::new(Box::new(BufReader::new(Cursor::new(str))), Some(4));
-//
-//         let mut buf: [u8; 4] = [0u8; 4];
-//
-//         let result = source.read(buf.as_mut_slice());
-//         assert_eq!(result.is_ok(), true);
-//         assert_eq!(result.unwrap(), 2);
-//         assert_eq!(buf[0], 65u8);
-//         assert_eq!(buf[1], 66u8);
-//         assert_eq!(buf[2], 0u8);
-//         assert_eq!(buf[3], 0u8);
-//     }
-//
-//     #[test]
-//     fn read_6_out_of_2_metaint() {
-//         let str = "AB_AB_AB";
-//         let mut source = IcySource::new(Box::new(BufReader::new(Cursor::new(str))), Some(2));
-//
-//         let mut buf: [u8; 6] = [0u8; 6];
-//
-//         let result = source.read(buf.as_mut_slice());
-//         assert_eq!(result.is_ok(), true);
-//         assert_eq!(result.unwrap(), 6);
-//         assert_eq!(buf[0], 65u8);
-//         assert_eq!(buf[1], 66u8);
-//         assert_eq!(buf[2], 65u8);
-//         assert_eq!(buf[3], 66u8);
-//         assert_eq!(buf[4], 65u8);
-//         assert_eq!(buf[5], 66u8);
-//     }
-//
-//
-//     #[test]
-//     fn read_3_out_of_4_metaint_3_times() {
-//         let str = "ABCD_ABCD_ABCD_";
-//         let mut source = IcySource::new(Box::new(BufReader::new(Cursor::new(str))), Some(4));
-//
-//         let mut buf: [u8; 3] = [0u8; 3];
-//
-//         let result = source.read(buf.as_mut_slice());
-//         assert_eq!(result.is_ok(), true);
-//         assert_eq!(result.unwrap(), 3);
-//         assert_eq!(buf[0], 65u8);
-//         assert_eq!(buf[1], 66u8);
-//         assert_eq!(buf[2], 67u8);
-//
-//         let result = source.read(buf.as_mut_slice());
-//         assert_eq!(result.is_ok(), true);
-//         assert_eq!(result.unwrap(), 3);
-//         assert_eq!(buf[0], 68u8);
-//         assert_eq!(buf[1], 65u8);
-//         assert_eq!(buf[2], 66u8);
-//
-//         let result = source.read(buf.as_mut_slice());
-//         assert_eq!(result.is_ok(), true);
-//         assert_eq!(result.unwrap(), 3);
-//         assert_eq!(buf[0], 67u8);
-//         assert_eq!(buf[1], 68u8);
-//         assert_eq!(buf[2], 65u8);
-//     }
-//
-//     #[test]
-//     fn read_5_out_of_4_metaint_3_times() {
-//         let str = "ABCD_ABCD_ABCD_";
-//         let mut source = IcySource::new(Box::new(BufReader::new(Cursor::new(str))), Some(4));
-//
-//         let mut buf: [u8; 5] = [0u8; 5];
-//
-//         let result = source.read(buf.as_mut_slice());
-//         assert_eq!(result.is_ok(), true);
-//         assert_eq!(result.unwrap(), 5);
-//         assert_eq!(buf[0], 65u8);
-//         assert_eq!(buf[1], 66u8);
-//         assert_eq!(buf[2], 67u8);
-//         assert_eq!(buf[3], 68u8);
-//         assert_eq!(buf[4], 65u8);
-//
-//         let result = source.read(buf.as_mut_slice());
-//         assert_eq!(result.is_ok(), true);
-//         assert_eq!(result.unwrap(), 5);
-//         assert_eq!(buf[0], 66u8);
-//         assert_eq!(buf[1], 67u8);
-//         assert_eq!(buf[2], 68u8);
-//         assert_eq!(buf[3], 65u8);
-//         assert_eq!(buf[4], 66u8);
-//
-//         let result = source.read(buf.as_mut_slice());
-//         assert_eq!(result.is_ok(), true);
-//         assert_eq!(result.unwrap(), 2);
-//         assert_eq!(buf[0], 67u8);
-//         assert_eq!(buf[1], 68u8);
-//     }
-// }
