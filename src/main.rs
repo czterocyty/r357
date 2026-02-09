@@ -15,6 +15,7 @@ use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
 use symphonia::core::formats::FormatOptions;
@@ -28,7 +29,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::{JoinError, spawn, spawn_blocking};
 use tokio::time::Sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::Instrument;
+use tracing::{debug, Instrument};
 use tracing::instrument::Instrumented;
 use tracing::{Level, info, instrument, warn};
 use tracing_subscriber::util::SubscriberInitExt;
@@ -53,6 +54,10 @@ pub enum R357Error {
     JoinError(#[from] JoinError),
     #[error("Bad binding {0}")]
     BadBinding(#[from] AddrParseError),
+    #[error("Failure of service discovery {0}")]
+    ServiceDiscoveryFailure(#[from] mdns_sd::Error),
+    #[error("Hostname not given")]
+    NoHostname(),
 }
 
 #[derive(Debug, Parser)]
@@ -131,7 +136,29 @@ async fn main() {
 
     spawn(player_worker(rx, state.clone(), Arc::clone(&args)));
 
-    let _ = start_http_server(tx, state, &args).await;
+    let _ = start_http_server(tx, state, Arc::clone(&args)).await;
+
+    let _ = register_service(Arc::clone(&args));
+}
+
+
+fn register_service(args: Arc<Args>) -> Result<(), R357Error> {
+    // let mdns = ServiceDaemon::new()?;
+    //
+    // let service = ServiceInfo::new(
+    //     "_r357_._tcp.local.",
+    //     "instance",
+    //     &get_hostname()?,
+    //
+    //     args.port,
+    //     None,
+    // )?;
+    //
+    // let _result = mdns.register(service);
+    //
+    // info!("Service registered");
+
+    Ok(())
 }
 
 async fn handle_status(state: Arc<RwLock<PlayerState>>) -> Result<impl warp::Reply, Infallible> {
@@ -159,13 +186,17 @@ async fn handle_stop(tx: Arc<Sender<Command>>) -> Result<impl warp::Reply, warp:
 async fn start_http_server(
     tx: Sender<Command>,
     state: Arc<RwLock<PlayerState>>,
-    args: &Args,
+    args: Arc<Args>,
 ) -> Result<(), R357Error> {
     let tx = Arc::new(tx);
     let tx1 = Arc::clone(&tx);
     let tx2 = Arc::clone(&tx);
 
-    let status_route = warp::path("status").and_then(move || handle_status(state.clone()));
+    let logger = warp::log("rest_api");
+
+    let status_route = warp::get()
+        .and(warp::path("status"))
+        .and_then(move || handle_status(state.clone()));
 
     let start_route = warp::post()
         .and(warp::path("start"))
@@ -175,12 +206,14 @@ async fn start_http_server(
         .and(warp::path("stop"))
         .and_then(move || handle_stop(Arc::clone(&tx2)));
 
-    let routes = status_route.or(start_route).or(stop_route);
+    let routes = status_route.or(start_route).or(stop_route).with(logger);
 
     let ipv4 = Ipv4Addr::from_str(&args.binding)?;
     let socket_addr = SocketAddrV4::new(ipv4, args.port);
 
-    let running = warp::serve(routes).run(socket_addr);
+
+    let running = warp::serve(routes)
+        .run(socket_addr);
 
     info!("Http server started at {}:{}", ipv4, args.port);
 
@@ -208,6 +241,7 @@ async fn player_worker(
             }
             Command::Stop => {
                 if let Some(token) = stored_token {
+                    info!("Cancelling");
                     token.cancel();
                     stored_token = None;
                 }
@@ -289,6 +323,7 @@ async fn play_stream(
     }
 
     info!("Stopped radio session");
+    debug!("Stopped radio session, result {result:?}");
 
     result
 }
