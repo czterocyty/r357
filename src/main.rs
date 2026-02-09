@@ -102,8 +102,10 @@ fn init_tracing() {
 
     let journald_layer = tracing_journald::layer();
     if let Ok(journald_layer) = journald_layer {
-        info!("Enabling journald");
+        info!("Enabling journald logging");
         layers.push(journald_layer.boxed());
+    } else {
+        info!("No journald logging");
     }
 
     let stdout_layer = tracing_subscriber::fmt::layer()
@@ -192,7 +194,7 @@ async fn start_http_server(
     let tx1 = Arc::clone(&tx);
     let tx2 = Arc::clone(&tx);
 
-    let logger = warp::log("rest_api");
+    let logger = warp::log("r357");
 
     let status_route = warp::get()
         .and(warp::path("status"))
