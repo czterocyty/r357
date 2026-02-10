@@ -578,7 +578,7 @@ mod tests {
     async fn retry_ok() {
         let backoff = ExponentialBackoff::default();
         let notify = |err, dur| {
-            warn!("Retry error happened {} duration {:?}", err, dur);
+            println!("Retry error happened {} duration {:?}", err, dur);
         };
 
         let func = || async {
