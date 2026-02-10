@@ -29,7 +29,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::{JoinError, spawn, spawn_blocking};
 use tokio::time::Sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, Instrument};
+use tracing::Instrument;
 use tracing::instrument::Instrumented;
 use tracing::{Level, info, instrument, warn};
 use tracing_subscriber::util::SubscriberInitExt;
@@ -58,6 +58,8 @@ pub enum R357Error {
     ServiceDiscoveryFailure(#[from] mdns_sd::Error),
     #[error("Hostname not given")]
     NoHostname(),
+    #[error("Cannot get ifaces")]
+    IfaceError(std::io::Error),
 }
 
 #[derive(Debug, Parser)]
@@ -105,19 +107,19 @@ fn init_tracing() {
         info!("Enabling journald logging");
         layers.push(journald_layer.boxed());
     } else {
-        info!("No journald logging");
+        info!("No journald logging, using stdout");
+
+        let stdout_layer = tracing_subscriber::fmt::layer()
+            .with_target(true)
+            .with_thread_ids(true)
+            .with_thread_names(true)
+            .with_line_number(true)
+            .with_file(true)
+            // .with_span_events(FmtSpan::FULL)
+            .boxed();
+
+        layers.push(stdout_layer);
     }
-
-    let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_target(true)
-        .with_thread_ids(true)
-        .with_thread_names(true)
-        .with_line_number(true)
-        .with_file(true)
-        // .with_span_events(FmtSpan::FULL)
-        .boxed();
-
-    layers.push(stdout_layer);
 
     Registry::default().with(filter).with(layers).init();
 }
@@ -310,7 +312,7 @@ async fn play_stream(
 
     let sleeper = create_sleeper();
     let retry = Retry::new(sleeper, backoff, notify, play);
-    let result = select! {
+    let result: Resule() = select! {
         result = retry => result,
         _ = cancel_token.cancelled() => {
             info!("Cancelling playback");
@@ -324,8 +326,10 @@ async fn play_stream(
         lock.unwrap().stop();
     }
 
-    info!("Stopped radio session");
-    debug!("Stopped radio session, result {result:?}");
+    match result {
+        Ok(()) => info!("Stopped radio session"),
+        Err(ref e) => warn!("Stopped radio session, due to error {e}"),
+    };
 
     result
 }
