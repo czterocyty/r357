@@ -60,6 +60,8 @@ pub enum R357Error {
     NoHostname(),
     #[error("Cannot get ifaces")]
     IfaceError(std::io::Error),
+    #[error("Other failure")]
+    Other,
 }
 
 #[derive(Debug, Parser)]
@@ -312,7 +314,7 @@ async fn play_stream(
 
     let sleeper = create_sleeper();
     let retry = Retry::new(sleeper, backoff, notify, play);
-    let result: Resule() = select! {
+    let result: Result<(), R357Error> = select! {
         result = retry => result,
         _ = cancel_token.cancelled() => {
             info!("Cancelling playback");
@@ -552,4 +554,69 @@ fn play(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+    use backoff::ExponentialBackoffBuilder;
+    use super::*;
+
+    fn mocked_play(result: Result<(), R357Error>) -> Result<(), R357Error> {
+        result
+    }
+
+    fn to_backoff_error(result: Result<Result<(), R357Error>, JoinError>) -> Result<(), backoff::Error<R357Error>> {
+        match result {
+            Ok(Ok(x)) => Ok(x),
+            Ok(Err(e)) => Err(backoff::Error::transient(e)),
+            Err(e) => Err(backoff::Error::transient(R357Error::JoinError(e))),
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_ok() {
+        let backoff = ExponentialBackoff::default();
+        let notify = |err, dur| {
+            warn!("Retry error happened {} duration {:?}", err, dur);
+        };
+
+        let func = || async {
+            let result = spawn_blocking(|| {
+                mocked_play(Ok(()))
+            }).await;
+
+            to_backoff_error(result)
+        };
+
+        let result = backoff::future::retry_notify(backoff, func, notify).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn retry_error() {
+        let backoff = ExponentialBackoffBuilder::new()
+            .with_max_elapsed_time(Some(Duration::from_secs(2u64)))
+            .build();
+        let notify = |err, dur| {
+            warn!("Retry error happened {} duration {:?}", err, dur);
+        };
+
+        let func = || async {
+            let result = spawn_blocking(|| {
+                mocked_play(Err(R357Error::Other))
+            }).await;
+
+            to_backoff_error(result)
+        };
+
+        let start_time = Instant::now();
+        let result = backoff::future::retry_notify(backoff, func, notify).await;
+        let duration = start_time.elapsed();
+
+        assert!(result.is_err());
+        assert!(Duration::from_secs(2u64) >= duration);
+        assert!(duration <= Duration::from_secs(3u64));
+    }
 }
