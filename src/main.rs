@@ -273,6 +273,14 @@ impl Sleeper for InstrumentedSleeper {
     }
 }
 
+fn to_backoff_error(result: Result<Result<(), R357Error>, JoinError>) -> Result<(), backoff::Error<R357Error>> {
+    match result {
+        Ok(Ok(x)) => Ok(x),
+        Ok(Err(e)) => Err(backoff::Error::transient(e)),
+        Err(e) => Err(backoff::Error::transient(R357Error::JoinError(e))),
+    }
+}
+
 #[instrument(level = "debug")]
 async fn play_stream(
     state: Arc<RwLock<PlayerState>>,
@@ -301,15 +309,11 @@ async fn play_stream(
         let cancel_token = cancel_token.clone();
 
         let result = spawn_blocking(move || {
-            play(state, Arc::clone(&args), cancel_token.clone()).map_err(backoff::Error::transient)
+            play(state, Arc::clone(&args), cancel_token.clone())
         })
         .await;
 
-        match result {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(e),
-            Err(e) => Err(backoff::Error::transient(R357Error::JoinError(e))),
-        }
+        to_backoff_error(result)
     };
 
     let sleeper = create_sleeper();
@@ -564,14 +568,6 @@ mod tests {
 
     fn mocked_play(result: Result<(), R357Error>) -> Result<(), R357Error> {
         result
-    }
-
-    fn to_backoff_error(result: Result<Result<(), R357Error>, JoinError>) -> Result<(), backoff::Error<R357Error>> {
-        match result {
-            Ok(Ok(x)) => Ok(x),
-            Ok(Err(e)) => Err(backoff::Error::transient(e)),
-            Err(e) => Err(backoff::Error::transient(R357Error::JoinError(e))),
-        }
     }
 
     #[tokio::test]
