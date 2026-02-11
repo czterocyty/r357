@@ -8,13 +8,15 @@ use reqwest::blocking::Response;
 use reqwest::header::CONTENT_TYPE;
 use serde::Serialize;
 use std::convert::Infallible;
+use std::env;
 use std::io::ErrorKind::NotSeekable;
 use std::io::{Read, Seek, SeekFrom};
-use std::net::{AddrParseError, Ipv4Addr, SocketAddrV4};
+use std::net::{AddrParseError, IpAddr, Ipv4Addr, SocketAddrV4};
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use if_addrs::IfAddr;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
@@ -29,7 +31,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::{JoinError, spawn, spawn_blocking};
 use tokio::time::Sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::Instrument;
+use tracing::{debug, Instrument};
 use tracing::instrument::Instrumented;
 use tracing::{Level, info, instrument, warn};
 use tracing_subscriber::util::SubscriberInitExt;
@@ -57,8 +59,8 @@ pub enum R357Error {
     #[error("Failure of service discovery {0}")]
     ServiceDiscoveryFailure(#[from] mdns_sd::Error),
     #[error("Hostname not given")]
-    NoHostname(),
-    #[error("Cannot get ifaces")]
+    NoHostname,
+    #[error("Cannot get ifaces {0}")]
     IfaceError(std::io::Error),
     #[error("Other failure")]
     Other,
@@ -131,7 +133,7 @@ async fn main() {
     init_tracing();
 
     let args = Args::parse();
-    let args = Arc::new(args);
+    let args: Arc<Args> = Arc::new(args);
 
     let (tx, rx) = mpsc::channel(8);
 
@@ -142,27 +144,64 @@ async fn main() {
 
     spawn(player_worker(rx, state.clone(), Arc::clone(&args)));
 
-    let _ = start_http_server(tx, state, Arc::clone(&args)).await;
+    let server = start_http_server(tx, state, Arc::clone(&args));
 
-    let _ = register_service(Arc::clone(&args));
+    spawn_blocking(move || {
+        let _ = register_service(Arc::clone(&args));
+    });
+
+    let _ = server.await;
 }
 
+fn find_hostname() -> Result<String, R357Error> {
+    match hostname::get() {
+        Err(_) => Err(R357Error::NoHostname),
+        Ok(hostname) => hostname
+            .to_str()
+            .ok_or(R357Error::NoHostname)
+            .map(|s| s.to_string())
+    }
+}
+
+fn find_ips(args: Arc<Args>) -> Result<Vec<IpAddr>, R357Error> {
+    let ifaces = if_addrs::get_if_addrs().map_err(R357Error::IfaceError)?;
+
+    let binding: Ipv4Addr = Ipv4Addr::from_str(&args.binding)?;
+
+    let set = ifaces.iter().filter_map(|iface| {
+        match &iface.addr {
+            IfAddr::V4(addr) => {
+                if binding == Ipv4Addr::new(0, 0, 0, 0) || addr.ip == binding {
+                    Some(IpAddr::V4(addr.ip))
+                } else {
+                    None
+                }
+            },
+            IfAddr::V6(_) => None,
+        }
+    }).collect::<Vec<IpAddr>>();
+
+    Ok(set)
+}
 
 fn register_service(args: Arc<Args>) -> Result<(), R357Error> {
-    // let mdns = ServiceDaemon::new()?;
-    //
-    // let service = ServiceInfo::new(
-    //     "_r357_._tcp.local.",
-    //     "instance",
-    //     &get_hostname()?,
-    //
-    //     args.port,
-    //     None,
-    // )?;
-    //
-    // let _result = mdns.register(service);
-    //
-    // info!("Service registered");
+    let mdns = ServiceDaemon::new()?;
+
+    let instance_name = &env::var("SYSTEMD_UNIT").unwrap_or("instance".to_string());
+    debug!("MDNS instance name {}", instance_name);
+
+    let service = ServiceInfo::new(
+        "_r357_._tcp.local.",
+        instance_name,
+        &find_hostname()?,
+        find_ips(Arc::clone(&args))?.as_slice(),
+        args.port,
+        None,
+    )?;
+
+    let _result = mdns.register(service);
+
+    info!("Service registered in mDNS");
 
     Ok(())
 }
