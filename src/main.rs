@@ -100,6 +100,10 @@ enum Command {
     Stop,
 }
 
+fn is_under_systemd() -> bool {
+    env::var("SYSTEMD_UNIT").is_ok()
+}
+
 fn init_tracing() {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("error,r357=debug"));
@@ -107,9 +111,9 @@ fn init_tracing() {
     let mut layers = Vec::new();
 
     let journald_layer = tracing_journald::layer();
-    if let Ok(journald_layer) = journald_layer {
+    if is_under_systemd() && journald_layer.is_ok() {
         info!("Enabling journald logging");
-        layers.push(journald_layer.boxed());
+        layers.push(journald_layer.unwrap().boxed());
     } else {
         info!("No journald logging, using stdout");
 
