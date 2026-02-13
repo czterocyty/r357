@@ -31,9 +31,8 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::{JoinError, spawn, spawn_blocking};
 use tokio::time::Sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, Instrument};
+use tracing::{debug, info, instrument, Instrument, Level, warn};
 use tracing::instrument::Instrumented;
-use tracing::{Level, info, instrument, warn};
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 use tracing_subscriber::{Registry, prelude::*};
@@ -605,13 +604,34 @@ fn play(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::time::Instant;
     use backoff::ExponentialBackoffBuilder;
     use super::*;
 
-    fn mocked_play(result: Result<(), R357Error>) -> Result<(), R357Error> {
-        result
+    struct MockedPlay {
+        calls: u32,
     }
+
+    impl MockedPlay {
+        fn new() -> Self {
+            MockedPlay {
+                calls: 0u32,
+            }
+        }
+
+        async fn execute(&mut self, result: Result<(), R357Error>) -> Result<(), backoff::Error<R357Error>> {
+            self.calls += 1;
+
+            let result = spawn_blocking(move || {
+                result
+            }).await;
+
+            to_backoff_error(result)
+        }
+    }
+
+
 
     #[tokio::test]
     async fn retry_ok() {
@@ -620,17 +640,19 @@ mod tests {
             println!("Retry error happened {} duration {:?}", err, dur);
         };
 
-        let func = || async {
-            let result = spawn_blocking(|| {
-                mocked_play(Ok(()))
-            }).await;
+        let mocked_play = MockedPlay::new();
+        let mocked_play = RefCell::new(mocked_play);
 
-            to_backoff_error(result)
+        let play = || async {
+            let mut mocked_play = mocked_play.borrow_mut();
+            let result = mocked_play.execute(Ok(()));
+            result.await
         };
 
-        let result = backoff::future::retry_notify(backoff, func, notify).await;
+        let result = backoff::future::retry_notify(backoff, play, notify).await;
 
         assert!(result.is_ok());
+        assert_eq!(1, mocked_play.borrow().calls);
     }
 
     #[tokio::test]
@@ -642,12 +664,12 @@ mod tests {
             warn!("Retry error happened {} duration {:?}", err, dur);
         };
 
-        let func = || async {
-            let result = spawn_blocking(|| {
-                mocked_play(Err(R357Error::Other))
-            }).await;
+        let mocked_play = MockedPlay::new();
+        let mocked_play = RefCell::new(mocked_play);
 
-            to_backoff_error(result)
+        let func = || async {
+            let mut mocked_play = mocked_play.borrow_mut();
+            mocked_play.execute(Err(R357Error::Other)).await
         };
 
         let start_time = Instant::now();
@@ -657,5 +679,65 @@ mod tests {
         assert!(result.is_err());
         assert!(Duration::from_secs(2u64) >= duration);
         assert!(duration <= Duration::from_secs(3u64));
+        assert!(mocked_play.borrow().calls > 1);
+    }
+
+    #[tokio::test]
+    async fn retry_error_using_retry() {
+        let backoff = ExponentialBackoffBuilder::new()
+            .with_max_elapsed_time(Some(Duration::from_secs(2u64)))
+            .build();
+        let notify = |err, dur| {
+            warn!("Retry error happened {} duration {:?}", err, dur);
+        };
+
+        let mocked_play = MockedPlay::new();
+        let mocked_play = RefCell::new(mocked_play);
+
+        let func = || async {
+            let mut mocked_play = mocked_play.borrow_mut();
+            mocked_play.execute(Err(R357Error::Other)).await
+        };
+
+        let start_time = Instant::now();
+        let sleeper = create_sleeper();
+        let result = Retry::new(sleeper, backoff, notify, func).await;
+        let duration = start_time.elapsed();
+
+        assert!(result.is_err());
+        assert!(Duration::from_secs(2u64) >= duration);
+        assert!(duration <= Duration::from_secs(3u64));
+        assert!(mocked_play.borrow().calls > 1);
+    }
+
+    #[tokio::test]
+    async fn retry_error_using_select() {
+        let backoff = ExponentialBackoffBuilder::new()
+            .with_max_elapsed_time(Some(Duration::from_secs(2u64)))
+            .build();
+        let notify = |err, dur| {
+            warn!("Retry error happened {} duration {:?}", err, dur);
+        };
+
+        let mocked_play = MockedPlay::new();
+        let mocked_play = RefCell::new(mocked_play);
+
+        let func = || async {
+            let mut mocked_play = mocked_play.borrow_mut();
+            mocked_play.execute(Err(R357Error::Other)).await
+        };
+
+        let start_time = Instant::now();
+        let sleeper = create_sleeper();
+        let retry = Retry::new(sleeper, backoff, notify, func);
+        let result = select! {
+            result = retry => result,
+        };
+        let duration = start_time.elapsed();
+
+        assert!(result.is_err());
+        assert!(Duration::from_secs(2u64) >= duration);
+        assert!(duration <= Duration::from_secs(3u64));
+        assert!(mocked_play.borrow().calls > 1);
     }
 }
