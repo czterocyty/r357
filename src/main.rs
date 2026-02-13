@@ -661,7 +661,7 @@ mod tests {
             .with_max_elapsed_time(Some(Duration::from_secs(2u64)))
             .build();
         let notify = |err, dur| {
-            warn!("Retry error happened {} duration {:?}", err, dur);
+            println!("Retry error happened {} duration {:?}", err, dur);
         };
 
         let mocked_play = MockedPlay::new();
@@ -688,7 +688,7 @@ mod tests {
             .with_max_elapsed_time(Some(Duration::from_secs(2u64)))
             .build();
         let notify = |err, dur| {
-            warn!("Retry error happened {} duration {:?}", err, dur);
+            println!("Retry error happened {} duration {:?}", err, dur);
         };
 
         let mocked_play = MockedPlay::new();
@@ -716,7 +716,7 @@ mod tests {
             .with_max_elapsed_time(Some(Duration::from_secs(2u64)))
             .build();
         let notify = |err, dur| {
-            warn!("Retry error happened {} duration {:?}", err, dur);
+            println!("Retry error happened {} duration {:?}", err, dur);
         };
 
         let mocked_play = MockedPlay::new();
