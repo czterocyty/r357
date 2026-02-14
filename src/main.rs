@@ -100,7 +100,7 @@ enum Command {
 }
 
 fn is_under_systemd() -> bool {
-    env::var("SYSTEMD_UNIT").is_ok()
+    env::var("INVOCATION_ID").is_ok()
 }
 
 fn init_tracing() {
