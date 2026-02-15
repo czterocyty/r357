@@ -73,6 +73,8 @@ struct Args {
     binding: String,
     #[arg(short, default_value_t = 6681)]
     port: u16,
+    #[arg(long, default_value_t = false)]
+    no_mdns: bool,
 }
 
 #[derive(Serialize, Debug)]
@@ -149,9 +151,11 @@ async fn main() {
 
     let server = start_http_server(tx, state, Arc::clone(&args));
 
-    spawn_blocking(move || {
-        let _ = register_service(Arc::clone(&args));
-    });
+    if !args.no_mdns {
+        spawn_blocking(move || {
+            let _ = register_service(Arc::clone(&args));
+        });
+    }
 
     let _ = server.await;
 }
@@ -191,7 +195,7 @@ fn register_service(args: Arc<Args>) -> Result<(), R357Error> {
     let mdns = ServiceDaemon::new()?;
 
     let instance_name = &env::var("SYSTEMD_UNIT").unwrap_or("instance".to_string());
-    debug!("MDNS instance name {}", instance_name);
+    debug!("mDNS instance name {}", instance_name);
 
     let service = ServiceInfo::new(
         "_r357_._tcp.local.",
