@@ -73,7 +73,7 @@ struct Args {
     binding: String,
     #[arg(short, default_value_t = 6681)]
     port: u16,
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false, help = "Disables mDNS advertisement")]
     no_mdns: bool,
 }
 
