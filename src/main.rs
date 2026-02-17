@@ -354,7 +354,9 @@ async fn play_stream(
         let cancel_token = cancel_token.clone();
 
         let result: Result<Result<(), R357Error>, JoinError> = spawn_blocking(move || {
-            play(state, args, cancel_token)
+            let ret = play(state, args, cancel_token);
+            info!("Blocked play result {:?}", ret);
+            ret
         })
         .await;
 
