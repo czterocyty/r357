@@ -341,13 +341,12 @@ async fn play_stream(
     }
 
     let state_to_update = Arc::clone(&state);
+    let args = Arc::clone(&args);
 
     let backoff = ExponentialBackoff::default();
     let notify = |err, dur| {
         warn!("Retry error happened {} duration {:?}", err, dur);
     };
-
-    let args = Arc::clone(&args);
 
     let play = || async {
         let state = Arc::clone(&state);
@@ -355,11 +354,11 @@ async fn play_stream(
         let cancel_token = cancel_token.clone();
 
         let result: Result<Result<(), R357Error>, JoinError> = spawn_blocking(move || {
-            play(state, Arc::clone(&args), cancel_token.clone())
+            play(state, args, cancel_token)
         })
         .await;
 
-        debug!("Result error from play {:?}", result);
+        info!("Result from play {:?}", result);
 
         to_backoff_error(result)
     };
