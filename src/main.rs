@@ -354,10 +354,12 @@ async fn play_stream(
         let args = Arc::clone(&args);
         let cancel_token = cancel_token.clone();
 
-        let result = spawn_blocking(move || {
+        let result: Result<Result<(), R357Error>, JoinError> = spawn_blocking(move || {
             play(state, Arc::clone(&args), cancel_token.clone())
         })
         .await;
+
+        debug!("Result error from play {:?}", result);
 
         to_backoff_error(result)
     };
@@ -541,7 +543,10 @@ fn play(
     let metaint = parse_metaint_header(&response)?;
 
     let source = IcySource::new(Box::new(response), metaint, state);
-    let mss = MediaSourceStream::new(Box::new(source), MediaSourceStreamOptions::default());
+    let stream_options = MediaSourceStreamOptions {
+        buffer_len: 256 * 1024,
+    };
+    let mss = MediaSourceStream::new(Box::new(source), stream_options);
 
     let mut hint = Hint::new();
     hint.mime_type("audio/mpeg");
