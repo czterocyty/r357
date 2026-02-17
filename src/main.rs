@@ -354,8 +354,8 @@ async fn play_stream(
         let cancel_token = cancel_token.clone();
 
         let result: Result<Result<(), R357Error>, JoinError> = spawn_blocking(move || {
-            let ret = play(state, args, cancel_token);
-            info!("Blocked play result {:?}", ret);
+            let ret = play_once(state, args, cancel_token);
+            info!("Blocked play_once result {:?}", ret);
             ret
         })
         .await;
@@ -515,7 +515,7 @@ impl<R: Read + Send + Sync> MediaSource for IcySource<R> {
 }
 
 #[instrument(level = "debug")]
-fn play(
+fn play_once(
     state: Arc<RwLock<PlayerState>>,
     args: Arc<Args>,
     cancel_token: CancellationToken,
