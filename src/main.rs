@@ -1,8 +1,10 @@
 use backoff::ExponentialBackoffBuilder;
 use backoff::future::{Retry, Sleeper};
 use clap::Parser;
+use if_addrs::IfAddr;
 use libpulse_binding::stream::Direction;
 use libpulse_simple_binding as pulse;
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 use reqwest::blocking;
 use reqwest::blocking::Response;
 use reqwest::header::CONTENT_TYPE;
@@ -17,8 +19,6 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use if_addrs::IfAddr;
-use mdns_sd::{ServiceDaemon, ServiceInfo};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
 use symphonia::core::formats::FormatOptions;
@@ -32,8 +32,8 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::{JoinError, spawn, spawn_blocking};
 use tokio::time::Sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument, Instrument, Level, warn};
 use tracing::instrument::Instrumented;
+use tracing::{Instrument, Level, debug, info, instrument, warn};
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 use tracing_subscriber::{Registry, prelude::*};
@@ -167,7 +167,7 @@ fn find_hostname() -> Result<String, R357Error> {
         Ok(hostname) => hostname
             .to_str()
             .ok_or(R357Error::NoHostname)
-            .map(|s| s.to_string())
+            .map(|s| s.to_string()),
     }
 }
 
@@ -176,18 +176,19 @@ fn find_ips(args: Arc<Args>) -> Result<Vec<IpAddr>, R357Error> {
 
     let binding: Ipv4Addr = Ipv4Addr::from_str(&args.binding)?;
 
-    let set = ifaces.iter().filter_map(|iface| {
-        match &iface.addr {
+    let set = ifaces
+        .iter()
+        .filter_map(|iface| match &iface.addr {
             IfAddr::V4(addr) => {
                 if binding == Ipv4Addr::new(0, 0, 0, 0) || addr.ip == binding {
                     Some(IpAddr::V4(addr.ip))
                 } else {
                     None
                 }
-            },
+            }
             IfAddr::V6(_) => None,
-        }
-    }).collect::<Vec<IpAddr>>();
+        })
+        .collect::<Vec<IpAddr>>();
 
     Ok(set)
 }
@@ -264,9 +265,7 @@ async fn start_http_server(
     let ipv4 = Ipv4Addr::from_str(&args.binding)?;
     let socket_addr = SocketAddrV4::new(ipv4, args.port);
 
-
-    let running = warp::serve(routes)
-        .run(socket_addr);
+    let running = warp::serve(routes).run(socket_addr);
 
     info!("Http server started at {}:{}", ipv4, args.port);
 
@@ -334,10 +333,16 @@ impl RetryablePlayback {
         args: Arc<Args>,
         cancel_token: CancellationToken,
     ) -> Self {
-        RetryablePlayback { state, args, cancel_token }
+        RetryablePlayback {
+            state,
+            args,
+            cancel_token,
+        }
     }
 
-    fn playback<'a>(&'a mut self) -> impl FnMut() -> Pin<Box<dyn Future<Output = RetryableResult> + Send + 'a>> + 'a {
+    fn playback<'a>(
+        &'a mut self,
+    ) -> impl FnMut() -> Pin<Box<dyn Future<Output = RetryableResult> + Send + 'a>> + 'a {
         || {
             Box::pin(async {
                 let state = Arc::clone(&self.state);
@@ -349,7 +354,7 @@ impl RetryablePlayback {
                     info!("Blocked play_once result {:?}", ret);
                     ret
                 })
-                    .await;
+                .await;
                 info!("Result from play {:?}", result);
 
                 let backoff_result = to_backoff_error(result);
@@ -391,11 +396,8 @@ async fn play_stream(
         warn!("Retry error happened {} duration {:?}", err, dur);
     };
 
-    let mut retryable_playback = RetryablePlayback::new(
-        Arc::clone(&state),
-        Arc::clone(&args),
-        cancel_token.clone(),
-    );
+    let mut retryable_playback =
+        RetryablePlayback::new(Arc::clone(&state), Arc::clone(&args), cancel_token.clone());
 
     let sleeper = create_sleeper();
     let retry = Retry::new(sleeper, backoff, notify, retryable_playback.playback());
@@ -646,10 +648,10 @@ fn play_once(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use backoff::{ExponentialBackoff, ExponentialBackoffBuilder};
     use std::cell::RefCell;
     use std::time::Instant;
-    use backoff::{ExponentialBackoff, ExponentialBackoffBuilder};
-    use super::*;
 
     struct MockedPlay {
         calls: u32,
@@ -657,23 +659,20 @@ mod tests {
 
     impl MockedPlay {
         fn new() -> Self {
-            MockedPlay {
-                calls: 0u32,
-            }
+            MockedPlay { calls: 0u32 }
         }
 
-        async fn execute(&mut self, result: Result<(), R357Error>) -> Result<(), backoff::Error<R357Error>> {
+        async fn execute(
+            &mut self,
+            result: Result<(), R357Error>,
+        ) -> Result<(), backoff::Error<R357Error>> {
             self.calls += 1;
 
-            let result = spawn_blocking(move || {
-                result
-            }).await;
+            let result = spawn_blocking(move || result).await;
 
             to_backoff_error(result)
         }
     }
-
-
 
     #[tokio::test]
     async fn retry_ok() {
