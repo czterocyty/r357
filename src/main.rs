@@ -1,4 +1,4 @@
-use backoff::ExponentialBackoff;
+use backoff::{Error, ExponentialBackoff};
 use backoff::future::{Retry, Sleeper};
 use clap::Parser;
 use libpulse_binding::stream::Direction;
@@ -45,21 +45,21 @@ pub enum R357Error {
     NotMp3Stream,
     #[error("Bad metaint header")]
     BadMetaIntHeader,
-    #[error("Connect error {0}")]
+    #[error("Connect error: {0}")]
     ConnectError(#[from] reqwest::Error),
-    #[error("PulseAudio error {0}")]
+    #[error("PulseAudio error: {0}")]
     PulseError(#[from] libpulse_binding::error::PAErr),
     #[error("Symphonia error: {0}")]
     DecodeError(#[from] symphonia::core::errors::Error),
     #[error("Join error: {0}")]
     JoinError(#[from] JoinError),
-    #[error("Bad binding {0}")]
+    #[error("Bad binding: {0}")]
     BadBinding(#[from] AddrParseError),
     #[error("Failure of service discovery {0}")]
     ServiceDiscoveryFailure(#[from] mdns_sd::Error),
     #[error("Hostname not given")]
     NoHostname,
-    #[error("Cannot get ifaces {0}")]
+    #[error("Cannot get ifaces: {0}")]
     IfaceError(std::io::Error),
     #[error("Other failure")]
     Other,
@@ -359,10 +359,11 @@ async fn play_stream(
             ret
         })
         .await;
-
         info!("Result from play {:?}", result);
 
-        to_backoff_error(result)
+        let backoff_result = to_backoff_error(result);
+        info!("Backoff result from play {:?}", backoff_result);
+        backoff_result
     };
 
     let sleeper = create_sleeper();
