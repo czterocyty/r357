@@ -14,7 +14,6 @@ use std::env;
 use std::io::ErrorKind::NotSeekable;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{AddrParseError, IpAddr, Ipv4Addr, SocketAddrV4};
-use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
@@ -154,7 +153,7 @@ async fn main() {
 
     if !args.no_mdns {
         spawn_blocking(move || {
-            let _ = register_service(Arc::clone(&args));
+            let _ = register_service(&Arc::clone(&args));
         });
     }
 
@@ -167,11 +166,11 @@ fn find_hostname() -> Result<String, R357Error> {
         Ok(hostname) => hostname
             .to_str()
             .ok_or(R357Error::NoHostname)
-            .map(|s| s.to_string()),
+            .map(std::string::ToString::to_string),
     }
 }
 
-fn find_ips(args: Arc<Args>) -> Result<Vec<IpAddr>, R357Error> {
+fn find_ips(args: &Arc<Args>) -> Result<Vec<IpAddr>, R357Error> {
     let ifaces = if_addrs::get_if_addrs().map_err(R357Error::IfaceError)?;
 
     let binding: Ipv4Addr = Ipv4Addr::from_str(&args.binding)?;
@@ -193,7 +192,7 @@ fn find_ips(args: Arc<Args>) -> Result<Vec<IpAddr>, R357Error> {
     Ok(set)
 }
 
-fn register_service(args: Arc<Args>) -> Result<(), R357Error> {
+fn register_service(args: &Arc<Args>) -> Result<(), R357Error> {
     let mdns = ServiceDaemon::new()?;
 
     let instance_name = &env::var("SYSTEMD_UNIT").unwrap_or("instance".to_string());
@@ -203,7 +202,7 @@ fn register_service(args: Arc<Args>) -> Result<(), R357Error> {
         "_r357_._tcp.local.",
         instance_name,
         &find_hostname()?,
-        find_ips(Arc::clone(&args))?.as_slice(),
+        find_ips(&Arc::clone(args))?.as_slice(),
         args.port,
         None,
     )?;
@@ -215,24 +214,25 @@ fn register_service(args: Arc<Args>) -> Result<(), R357Error> {
     Ok(())
 }
 
+#[allow(clippy::unused_async)]
 async fn handle_status(state: Arc<RwLock<PlayerState>>) -> Result<impl warp::Reply, Infallible> {
     let state = Arc::clone(&state);
     let state = state.read();
     let state = state.unwrap();
-    let state = state.deref();
+    let state = &*state;
     Ok(warp::reply::json(state))
 }
 
 async fn handle_start(tx: Arc<Sender<Command>>) -> Result<impl warp::Reply, Infallible> {
     match tx.send(Command::Start).await {
-        Ok(_) => Ok(StatusCode::ACCEPTED),
+        Ok(()) => Ok(StatusCode::ACCEPTED),
         Err(_) => Ok(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
 async fn handle_stop(tx: Arc<Sender<Command>>) -> Result<impl warp::Reply, warp::Rejection> {
     match tx.send(Command::Stop).await {
-        Ok(_) => Ok(StatusCode::ACCEPTED),
+        Ok(()) => Ok(StatusCode::ACCEPTED),
         Err(_) => Ok(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
@@ -351,7 +351,7 @@ impl RetryablePlayback {
                 let cancel_token = self.cancel_token.clone();
 
                 let result: JoinableResult = spawn_blocking(move || {
-                    let ret = play_once(state, args, cancel_token);
+                    let ret = play_once(state, &args, &cancel_token);
                     info!("Blocked play_once result {:?}", ret);
                     ret
                 })
@@ -404,7 +404,7 @@ async fn play_stream(
     let retry = Retry::new(sleeper, backoff, notify, retryable_playback.playback());
     let result: Result<(), R357Error> = select! {
         result = retry => result,
-        _ = cancel_token.cancelled() => {
+        () = cancel_token.cancelled() => {
             info!("Cancelling playback");
             Ok(())
         }
@@ -472,10 +472,10 @@ impl<R: Read> IcySource<R> {
         let mut buf = vec![0u8; meta_len];
         self.inner.read_exact(&mut buf)?;
 
-        if let Some(title) = self.parse_title(&buf) {
+        if let Some(title) = IcySource::<R>::parse_title(&buf) {
             let lock = self.state.try_write();
             if let Ok(mut guard) = lock {
-                let state = guard.deref_mut();
+                let state = &mut *guard;
                 if state.song_title.as_deref() != Some(&title) {
                     info!("{}", &title);
                     state.song_title = Some(title);
@@ -486,7 +486,7 @@ impl<R: Read> IcySource<R> {
         Ok(())
     }
 
-    fn parse_title(&self, buf: &[u8]) -> Option<String> {
+    fn parse_title(buf: &[u8]) -> Option<String> {
         let text = String::from_utf8_lossy(buf);
         let text = text.trim_matches('\0');
 
@@ -552,8 +552,8 @@ impl<R: Read + Send + Sync> MediaSource for IcySource<R> {
 #[instrument(level = "debug")]
 fn play_once(
     state: Arc<RwLock<PlayerState>>,
-    args: Arc<Args>,
-    cancel_token: CancellationToken,
+    args: &Arc<Args>,
+    cancel_token: &CancellationToken,
 ) -> Result<(), R357Error> {
     if cancel_token.is_cancelled() {
         return Ok(());
@@ -625,18 +625,18 @@ fn play_once(
 
     while !cancel_token.is_cancelled() {
         let packet = format.next_packet()?;
-        let decoded = decoder.decode(&packet)?;
+        let decoded_packet = decoder.decode(&packet)?;
 
         if sample_buf.is_none() {
             info!("Playback started");
             sample_buf = Some(SampleBuffer::<i16>::new(
-                decoded.capacity() as u64,
-                *decoded.spec(),
+                decoded_packet.capacity() as u64,
+                *decoded_packet.spec(),
             ));
         }
 
         let buf = sample_buf.as_mut().unwrap();
-        buf.copy_interleaved_ref(decoded);
+        buf.copy_interleaved_ref(decoded_packet);
 
         let pcm: &[i16] = buf.samples();
         let pcm_u8: &[u8] = bytemuck::cast_slice(pcm);
