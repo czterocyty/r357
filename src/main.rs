@@ -320,6 +320,7 @@ impl Sleeper for InstrumentedSleeper {
 }
 
 type RetryableResult = Result<(), backoff::Error<R357Error>>;
+type JoinableResult = Result<Result<(), R357Error>, JoinError>;
 
 struct RetryablePlayback {
     state: Arc<RwLock<PlayerState>>,
@@ -349,7 +350,7 @@ impl RetryablePlayback {
                 let args = Arc::clone(&self.args);
                 let cancel_token = self.cancel_token.clone();
 
-                let result: Result<Result<(), R357Error>, JoinError> = spawn_blocking(move || {
+                let result: JoinableResult = spawn_blocking(move || {
                     let ret = play_once(state, args, cancel_token);
                     info!("Blocked play_once result {:?}", ret);
                     ret
@@ -365,7 +366,7 @@ impl RetryablePlayback {
     }
 }
 
-fn to_backoff_error(result: Result<Result<(), R357Error>, JoinError>) -> RetryableResult {
+fn to_backoff_error(result: JoinableResult) -> RetryableResult {
     match result {
         Ok(Ok(x)) => Ok(x),
         Ok(Err(e)) => Err(backoff::Error::transient(e)),
@@ -418,7 +419,7 @@ async fn play_stream(
     match result {
         Ok(()) => info!("Stopped radio session"),
         Err(ref e) => warn!("Stopped radio session, due to error {e}"),
-    };
+    }
 
     result
 }
@@ -631,7 +632,7 @@ fn play_once(
             sample_buf = Some(SampleBuffer::<i16>::new(
                 decoded.capacity() as u64,
                 *decoded.spec(),
-            ))
+            ));
         }
 
         let buf = sample_buf.as_mut().unwrap();
