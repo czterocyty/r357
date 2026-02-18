@@ -341,6 +341,7 @@ impl RetryablePlayback {
         }
     }
 
+    #[allow(clippy::needless_lifetimes)]
     fn playback<'a>(
         &'a mut self,
     ) -> impl FnMut() -> Pin<Box<dyn Future<Output = RetryableResult> + Send + 'a>> + 'a {
