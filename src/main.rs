@@ -13,6 +13,7 @@ use std::io::ErrorKind::NotSeekable;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{AddrParseError, IpAddr, Ipv4Addr, SocketAddrV4};
 use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -319,7 +320,47 @@ impl Sleeper for InstrumentedSleeper {
     }
 }
 
-fn to_backoff_error(result: Result<Result<(), R357Error>, JoinError>) -> Result<(), backoff::Error<R357Error>> {
+type RetryableResult = Result<(), backoff::Error<R357Error>>;
+
+struct RetryablePlayback {
+    state: Arc<RwLock<PlayerState>>,
+    args: Arc<Args>,
+    cancel_token: CancellationToken,
+}
+
+impl RetryablePlayback {
+    fn new(
+        state: Arc<RwLock<PlayerState>>,
+        args: Arc<Args>,
+        cancel_token: CancellationToken,
+    ) -> Self {
+        RetryablePlayback { state, args, cancel_token }
+    }
+
+    fn playback<'a>(&'a mut self) -> impl FnMut() -> Pin<Box<dyn Future<Output = RetryableResult> + Send + 'a>> + 'a {
+        || {
+            Box::pin(async {
+                let state = Arc::clone(&self.state);
+                let args = Arc::clone(&self.args);
+                let cancel_token = self.cancel_token.clone();
+
+                let result: Result<Result<(), R357Error>, JoinError> = spawn_blocking(move || {
+                    let ret = play_once(state, args, cancel_token);
+                    info!("Blocked play_once result {:?}", ret);
+                    ret
+                })
+                    .await;
+                info!("Result from play {:?}", result);
+
+                let backoff_result = to_backoff_error(result);
+                info!("Backoff result from play {:?}", backoff_result);
+                backoff_result
+            })
+        }
+    }
+}
+
+fn to_backoff_error(result: Result<Result<(), R357Error>, JoinError>) -> RetryableResult {
     match result {
         Ok(Ok(x)) => Ok(x),
         Ok(Err(e)) => Err(backoff::Error::transient(e)),
@@ -350,26 +391,14 @@ async fn play_stream(
         warn!("Retry error happened {} duration {:?}", err, dur);
     };
 
-    let play = || async {
-        let state = Arc::clone(&state);
-        let args = Arc::clone(&args);
-        let cancel_token = cancel_token.clone();
-
-        let result: Result<Result<(), R357Error>, JoinError> = spawn_blocking(move || {
-            let ret = play_once(state, args, cancel_token);
-            info!("Blocked play_once result {:?}", ret);
-            ret
-        })
-        .await;
-        info!("Result from play {:?}", result);
-
-        let backoff_result = to_backoff_error(result);
-        info!("Backoff result from play {:?}", backoff_result);
-        backoff_result
-    };
+    let mut retryable_playback = RetryablePlayback::new(
+        Arc::clone(&state),
+        Arc::clone(&args),
+        cancel_token.clone(),
+    );
 
     let sleeper = create_sleeper();
-    let retry = Retry::new(sleeper, backoff, notify, play);
+    let retry = Retry::new(sleeper, backoff, notify, retryable_playback.playback());
     let result: Result<(), R357Error> = select! {
         result = retry => result,
         _ = cancel_token.cancelled() => {
@@ -619,7 +648,7 @@ fn play_once(
 mod tests {
     use std::cell::RefCell;
     use std::time::Instant;
-    use backoff::ExponentialBackoffBuilder;
+    use backoff::{ExponentialBackoff, ExponentialBackoffBuilder};
     use super::*;
 
     struct MockedPlay {
