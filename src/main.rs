@@ -1,4 +1,4 @@
-use backoff::{Error, ExponentialBackoff};
+use backoff::ExponentialBackoffBuilder;
 use backoff::future::{Retry, Sleeper};
 use clap::Parser;
 use libpulse_binding::stream::Direction;
@@ -343,7 +343,9 @@ async fn play_stream(
     let state_to_update = Arc::clone(&state);
     let args = Arc::clone(&args);
 
-    let backoff = ExponentialBackoff::default();
+    let backoff = ExponentialBackoffBuilder::new()
+        .with_max_elapsed_time(Some(Duration::from_secs(20 * 60)))
+        .build();
     let notify = |err, dur| {
         warn!("Retry error happened {} duration {:?}", err, dur);
     };
