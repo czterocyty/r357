@@ -11,7 +11,7 @@ symphonia = { version = "0.5.5", features = ["all", "opt-simd"] }
 libpulse-binding = "2.30.1"
 libpulse-simple-binding = "2.29.0"
 bytemuck = "1.25.0"
-backoff = { version = "0.4.0", features = ["tokio"] }
+tokio-retry2 = { version = "0.9.1", features = ["jitter"] }
 warp = { version = "0.4.2", features = ["server"] }
 serde = { version = "1.0.228", features = ["derive"] }
 clap = { version = "4.5.36", features = ["derive"] }

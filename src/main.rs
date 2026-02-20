@@ -1,5 +1,3 @@
-use backoff::ExponentialBackoffBuilder;
-use backoff::future::{Retry, Sleeper};
 use clap::Parser;
 use if_addrs::IfAddr;
 use libpulse_binding::stream::Direction;
@@ -29,10 +27,10 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::task::{JoinError, spawn, spawn_blocking};
-use tokio::time::Sleep;
+use tokio_retry2::{Notify, Retry, RetryError};
+use tokio_retry2::strategy::{ExponentialFactorBackoff, jitter_with_bounds};
 use tokio_util::sync::CancellationToken;
-use tracing::instrument::Instrumented;
-use tracing::{Instrument, Level, debug, info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 use tracing_subscriber::{Registry, prelude::*};
@@ -302,24 +300,8 @@ async fn player_worker(
     }
 }
 
-fn create_sleeper() -> impl Sleeper {
-    InstrumentedSleeper
-}
 
-struct InstrumentedSleeper;
-
-impl Sleeper for InstrumentedSleeper {
-    type Sleep = Instrumented<Sleep>;
-    fn sleep(&self, dur: Duration) -> Self::Sleep {
-        tokio::time::sleep(dur).instrument(tracing::span!(
-            Level::DEBUG,
-            "sleeper",
-            sleep = dur.as_secs_f64()
-        ))
-    }
-}
-
-type RetryableResult = Result<(), backoff::Error<R357Error>>;
+type RetryableResult = Result<(), tokio_retry2::RetryError<R357Error>>;
 type JoinableResult = Result<Result<(), R357Error>, JoinError>;
 
 struct RetryablePlayback {
@@ -370,8 +352,16 @@ impl RetryablePlayback {
 fn to_backoff_error(result: JoinableResult) -> RetryableResult {
     match result {
         Ok(Ok(x)) => Ok(x),
-        Ok(Err(e)) => Err(backoff::Error::transient(e)),
-        Err(e) => Err(backoff::Error::transient(R357Error::JoinError(e))),
+        Ok(Err(e)) => Err(RetryError::transient(e)),
+        Err(e) => Err(RetryError::transient(R357Error::JoinError(e))),
+    }
+}
+
+struct WarnNotifier;
+
+impl Notify<R357Error> for WarnNotifier {
+    fn notify(&mut self, err: &R357Error, dur: Duration) {
+        warn!("Retry error happened {} duration {:?}", err, dur);
     }
 }
 
@@ -391,18 +381,15 @@ async fn play_stream(
     let state_to_update = Arc::clone(&state);
     let args = Arc::clone(&args);
 
-    let backoff = ExponentialBackoffBuilder::new()
-        .with_max_elapsed_time(Some(Duration::from_secs(20 * 60)))
-        .build();
-    let notify = |err, dur| {
-        warn!("Retry error happened {} duration {:?}", err, dur);
-    };
+    let backoff = ExponentialFactorBackoff::from_millis(100, 1.0)
+        .max_delay(Duration::from_secs(2 * 60))
+        .map(jitter_with_bounds(0.5, 1.2))
+        .take(50);
 
     let mut retryable_playback =
         RetryablePlayback::new(Arc::clone(&state), Arc::clone(&args), cancel_token.clone());
 
-    let sleeper = create_sleeper();
-    let retry = Retry::new(sleeper, backoff, notify, retryable_playback.playback());
+    let retry = Retry::spawn_notify(backoff, retryable_playback.playback(), WarnNotifier);
     let result: Result<(), R357Error> = select! {
         result = retry => result,
         () = cancel_token.cancelled() => {
@@ -651,9 +638,9 @@ fn play_once(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use backoff::{ExponentialBackoff, ExponentialBackoffBuilder};
     use std::cell::RefCell;
     use std::time::Instant;
+    use tokio_retry2::strategy::FixedInterval;
 
     struct MockedPlay {
         calls: u32,
@@ -667,7 +654,7 @@ mod tests {
         async fn execute(
             &mut self,
             result: Result<(), R357Error>,
-        ) -> Result<(), backoff::Error<R357Error>> {
+        ) -> RetryableResult {
             self.calls += 1;
 
             let result = spawn_blocking(move || result).await;
@@ -676,12 +663,17 @@ mod tests {
         }
     }
 
+    struct Notifier;
+
+    impl Notify<R357Error> for Notifier {
+        fn notify(&mut self, err: &R357Error, dur: Duration) {
+            println!("Retry error happened {} duration {:?}", err, dur);
+        }
+    }
+
     #[tokio::test]
     async fn retry_ok() {
-        let backoff = ExponentialBackoff::default();
-        let notify = |err, dur| {
-            println!("Retry error happened {} duration {:?}", err, dur);
-        };
+        let backoff = FixedInterval::from_millis(1000);
 
         let mocked_play = MockedPlay::new();
         let mocked_play = RefCell::new(mocked_play);
@@ -692,7 +684,7 @@ mod tests {
             result.await
         };
 
-        let result = backoff::future::retry_notify(backoff, play, notify).await;
+        let result = Retry::spawn_notify(backoff, play, Notifier).await;
 
         assert!(result.is_ok());
         assert_eq!(1, mocked_play.borrow().calls);
@@ -700,12 +692,7 @@ mod tests {
 
     #[tokio::test]
     async fn retry_error() {
-        let backoff = ExponentialBackoffBuilder::new()
-            .with_max_elapsed_time(Some(Duration::from_secs(2u64)))
-            .build();
-        let notify = |err, dur| {
-            println!("Retry error happened {} duration {:?}", err, dur);
-        };
+        let backoff = FixedInterval::from_millis(1000).take(2);
 
         let mocked_play = MockedPlay::new();
         let mocked_play = RefCell::new(mocked_play);
@@ -716,70 +703,13 @@ mod tests {
         };
 
         let start_time = Instant::now();
-        let result = backoff::future::retry_notify(backoff, func, notify).await;
+        let result = Retry::spawn_notify(backoff, func, Notifier).await;
         let duration = start_time.elapsed();
 
-        assert!(result.is_err());
-        assert!(Duration::from_secs(2u64) >= duration);
-        assert!(duration <= Duration::from_secs(3u64));
-        assert!(mocked_play.borrow().calls > 1);
-    }
-
-    #[tokio::test]
-    async fn retry_error_using_retry() {
-        let backoff = ExponentialBackoffBuilder::new()
-            .with_max_elapsed_time(Some(Duration::from_secs(2u64)))
-            .build();
-        let notify = |err, dur| {
-            println!("Retry error happened {} duration {:?}", err, dur);
-        };
-
-        let mocked_play = MockedPlay::new();
-        let mocked_play = RefCell::new(mocked_play);
-
-        let func = || async {
-            let mut mocked_play = mocked_play.borrow_mut();
-            mocked_play.execute(Err(R357Error::Other)).await
-        };
-
-        let start_time = Instant::now();
-        let sleeper = create_sleeper();
-        let result = Retry::new(sleeper, backoff, notify, func).await;
-        let duration = start_time.elapsed();
+        println!("Duration {:?}", duration);
 
         assert!(result.is_err());
-        assert!(Duration::from_secs(2u64) >= duration);
-        assert!(duration <= Duration::from_secs(3u64));
-        assert!(mocked_play.borrow().calls > 1);
-    }
-
-    #[tokio::test]
-    async fn retry_error_using_select() {
-        let backoff = ExponentialBackoffBuilder::new()
-            .with_max_elapsed_time(Some(Duration::from_secs(2u64)))
-            .build();
-        let notify = |err, dur| {
-            println!("Retry error happened {} duration {:?}", err, dur);
-        };
-
-        let mocked_play = MockedPlay::new();
-        let mocked_play = RefCell::new(mocked_play);
-
-        let func = || async {
-            let mut mocked_play = mocked_play.borrow_mut();
-            mocked_play.execute(Err(R357Error::Other)).await
-        };
-
-        let start_time = Instant::now();
-        let sleeper = create_sleeper();
-        let retry = Retry::new(sleeper, backoff, notify, func);
-        let result = select! {
-            result = retry => result,
-        };
-        let duration = start_time.elapsed();
-
-        assert!(result.is_err());
-        assert!(Duration::from_secs(2u64) >= duration);
+        assert!(Duration::from_secs(2u64) <= duration);
         assert!(duration <= Duration::from_secs(3u64));
         assert!(mocked_play.borrow().calls > 1);
     }
