@@ -335,14 +335,14 @@ impl RetryablePlayback {
 
                 let result: JoinableResult = spawn_blocking(move || {
                     let ret = play_once(state, &args, &cancel_token);
-                    info!("Blocked play_once result {:?}", ret);
+                    debug!("Blocked play_once result {:?}", ret);
                     ret
                 })
                 .await;
-                info!("Result from play {:?}", result);
+                debug!("Result from play {:?}", result);
 
                 let backoff_result = to_backoff_error(result);
-                info!("Backoff result from play {:?}", backoff_result);
+                debug!("Backoff result from play {:?}", backoff_result);
                 backoff_result
             })
         }
@@ -361,7 +361,7 @@ struct WarnNotifier;
 
 impl Notify<R357Error> for WarnNotifier {
     fn notify(&mut self, err: &R357Error, dur: Duration) {
-        warn!("Retry error happened {} duration {:?}", err, dur);
+        warn!("Retry error happened {} duration {}s", err, dur.as_secs_f64());
     }
 }
 
@@ -480,7 +480,7 @@ impl<R: Read> IcySource<R> {
 
         for part in text.split(';') {
             if let Some(rest) = part.strip_prefix("StreamTitle='") {
-                if let Some(end) = rest.find('\'') {
+                if let Some(end) = rest.rfind('\'') {
                     return Some(rest[..end].to_string());
                 }
             }
