@@ -164,7 +164,7 @@ fn find_hostname() -> Result<String, R357Error> {
         Ok(hostname) => hostname
             .to_str()
             .ok_or(R357Error::NoHostname)
-            .map(std::string::ToString::to_string),
+            .map(|s| s.to_string() + ".local."),
     }
 }
 
@@ -197,7 +197,7 @@ fn register_service(args: &Arc<Args>) -> Result<(), R357Error> {
     debug!("mDNS instance name {}", instance_name);
 
     let service = ServiceInfo::new(
-        "_r357_._tcp.local.",
+        "_r357._tcp.local.",
         instance_name,
         &find_hostname()?,
         find_ips(&Arc::clone(args))?.as_slice(),
@@ -205,9 +205,12 @@ fn register_service(args: &Arc<Args>) -> Result<(), R357Error> {
         None,
     )?;
 
-    let _result = mdns.register(service);
+    let result = mdns.register(service);
 
-    info!("Service registered in mDNS");
+    match result {
+        Ok(_) => info!("Service registered in mDNS"),
+        Err(e) => warn!("Service not registered in mDNS due to error {e}"),
+    }
 
     Ok(())
 }
