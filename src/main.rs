@@ -716,4 +716,12 @@ mod tests {
         assert!(duration <= Duration::from_secs(3u64));
         assert!(mocked_play.borrow().calls > 1);
     }
+
+    #[test]
+    fn parse_title() {
+        let option = IcySource::<&[u8]>::parse_title(
+            b"StreamTitle='Radio 357 - 100%\' Pure Hip-Hop - 24/7';\0\0");
+
+        assert_eq!(option, Some("Radio 357 - 100%\' Pure Hip-Hop - 24/7".to_string()));
+    }
 }
